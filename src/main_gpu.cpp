@@ -406,8 +406,8 @@ int main(int argc, char* argv[]) {
     audio.init();
 
     std::cout << "Deploying armies...\n";
-    spawn_army(world, Faction::Red, {-550, 0}, 30000, {0.25f, 0.3f, 0.2f}, true);
-    spawn_army(world, Faction::Blue, {550, 0}, 30000, {0.50f, 0.35f, 0.15f}, false);
+    spawn_army(world, Faction::Red, {-550, 0}, 100000, {0.25f, 0.3f, 0.2f}, true);
+    spawn_army(world, Faction::Blue, {550, 0}, 100000, {0.50f, 0.35f, 0.15f}, false);
     g_game_state.init_capture_points(g_game_state.selected_map);
     g_game_state.phase = GamePhase::Playing;
     std::cout << "Deployed " << world.entity_count << " units\n";
@@ -442,8 +442,8 @@ int main(int argc, char* argv[]) {
         world.free_list.clear();
         world.live_count = 0;
         renderer.bases.reset({-550, 0}, {550, 0});
-        spawn_army(world, Faction::Red, {-550, 0}, 30000, {0.25f, 0.3f, 0.2f}, true);
-        spawn_army(world, Faction::Blue, {550, 0}, 30000, {0.50f, 0.35f, 0.15f}, false);
+        spawn_army(world, Faction::Red, {-550, 0}, 100000, {0.25f, 0.3f, 0.2f}, true);
+        spawn_army(world, Faction::Blue, {550, 0}, 100000, {0.50f, 0.35f, 0.15f}, false);
         g_game_state.init_capture_points(g_game_state.selected_map);
         g_game_state.match_time = 0;
         g_game_state.victory_timer = 0;

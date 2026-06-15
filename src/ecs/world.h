@@ -19,7 +19,7 @@ public:
     // Hard ceiling on simultaneously-alive units. Per-frame GPU cost (compute
     // dispatch + readback) scales with this, so capping it keeps frame time
     // safely under the driver's ~2s TDR timeout no matter how long you play.
-    static constexpr uint32_t MAX_LIVE_UNITS = 50000; // bounds per-frame GPU cost to stay well under driver TDR
+    static constexpr uint32_t MAX_LIVE_UNITS = 200000; // bounds per-frame GPU cost to stay well under driver TDR
 
     // Economy
     int money[2] = {500, 500};        // starting money

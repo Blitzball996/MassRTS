@@ -469,10 +469,10 @@ int main(int argc, char* argv[]) {
             {
                 FILE* dlog = fopen("diag.log", "a");
                 if (dlog) {
-                    fprintf(dlog, "t=%.0f fps=%d ent=%u live=%u proj=%zu | grid=%.1f upload=%.1f disp=%.1f read=%.1f cpu=%.1f (ms/s)\n",
+                    fprintf(dlog, "t=%.0f fps=%d ent=%u live=%u proj=%zu | grid=%.1f upload=%.1f disp=%.1f read=%.1f cpu=%.1f gpuMS=%.2f (ms/s)\n",
                             now, frame_count, world.entity_count, world.live_count,
                             renderer.projectiles.projectiles.size(),
-                            tm_grid*1000, tm_upload*1000, tm_dispatch*1000, tm_readback*1000, tm_cpu*1000);
+                            tm_grid*1000, tm_upload*1000, tm_dispatch*1000, tm_readback*1000, tm_cpu*1000, renderer.gpu_compute.last_gpu_ms);
                     tm_grid=tm_upload=tm_dispatch=tm_readback=tm_cpu=0;
                     fclose(dlog);
                 }

@@ -58,6 +58,7 @@ public:
     // the GPU isn't done, reusing last frame's CPU data. This guarantees the CPU
     // never blocks long enough to cascade into a driver TDR -> black screen.
     GLsync combat_fence = 0;
+    GLuint gpu_timer = 0; double last_gpu_ms = 0.0; bool timer_pending = false;
     // Triple-buffered async readback. After each dispatch we GPU-copy ssbo_units
     // into rb_buf[head] and set rb_fence[head]; readback maps the OLDEST buffer
     // (already finished -> no GPU stall). This removes the ~24ms/frame blocking
@@ -312,6 +313,18 @@ public:
         uint32_t groups = (unit_count + 255) / 256;
         uint32_t cell_groups = (22500 + 255) / 256;
 
+        // --- GPU timer: measure true GPU time of the 4 sim dispatches ---
+        if (gpu_timer == 0) glGenQueries(1, &gpu_timer);
+        if (timer_pending) {
+            GLint avail = 0;
+            glGetQueryObjectiv(gpu_timer, GL_QUERY_RESULT_AVAILABLE, &avail);
+            if (avail) {
+                GLuint64 ns = 0; glGetQueryObjectui64v(gpu_timer, GL_QUERY_RESULT, &ns);
+                last_gpu_ms = ns / 1.0e6; timer_pending = false;
+            }
+        }
+        bool do_time = !timer_pending;
+        if (do_time) glBeginQuery(GL_TIME_ELAPSED, gpu_timer);
         // 1: Clear spatial hash
         glUseProgram(spatial_shader);
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo_units);
@@ -353,6 +366,7 @@ public:
         glUniform1ui(glGetUniformLocation(movement_shader, "u_frame"), frame);
         glDispatchCompute(groups, 1, 1);
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+        if (do_time) { glEndQuery(GL_TIME_ELAPSED); timer_pending = true; }
 
         // Async-copy the just-computed unit buffer into the ring head, then fence
         // THAT copy. Readback will later map this buffer once its fence signals.

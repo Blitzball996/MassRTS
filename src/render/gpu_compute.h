@@ -372,7 +372,10 @@ public:
     void upload_combat_data(const World& world) {
         if (!combat_gpu_ready) return;
         struct UC { glm::vec2 pos, vel; float rot,hp,dmg,range,spd; uint32_t faction,type,state,target; float cd,max_hp,p2; };
-        std::vector<UC> d(world.entity_count);
+        // PERF: reuse a persistent staging buffer instead of allocating 3.2MB
+        // every frame (resize only grows; no per-frame construction churn).
+        static std::vector<UC> d;
+        if (d.size() < world.entity_count) d.resize(world.entity_count);
         for (uint32_t i = 0; i < world.entity_count; i++) {
             d[i].pos = world.transforms.position[i];
             d[i].vel = world.transforms.velocity[i];

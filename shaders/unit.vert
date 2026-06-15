@@ -12,6 +12,7 @@ layout(location=6) in float a_inst_state;
 uniform mat4 u_view;
 uniform mat4 u_proj;
 uniform float u_time;
+uniform float u_model_scale; // manifest per-unit render scale (default 1.0)
 
 out vec3 v_color;
 out vec3 v_normal;
@@ -65,7 +66,7 @@ void main() {
     v_local_pos = pos;
     v_local_normal = norm; // This is the key fix - local normal for face detection
 
-    float pixel_scale = a_inst_scale / 32.0;
+    float pixel_scale = (a_inst_scale / 32.0) * u_model_scale;
     pos *= pixel_scale;
 
     // Dead tilt

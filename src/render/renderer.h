@@ -8,6 +8,7 @@
 #include "decor.h"
 #include "base_system.h"
 #include "model_library.h"
+#include "../core/asset_manifest.h"
 #include "particles.h"
 #include "projectiles.h"
 #include "gpu_compute.h"
@@ -58,6 +59,7 @@ public:
     GLuint particle_shader = 0, billboard_shader = 0, projectile_shader = 0;
 
     Mesh meshes[NUM_MESH_TYPES]; // Infantry,Cavalry,Archer,Bomber,Artillery,Shield,Samurai
+    float model_render_scale[NUM_MESH_TYPES] = {1,1,1,1,1,1,1,1,1,1}; // manifest per-unit scale
     GLuint inst_vbo[NUM_MESH_TYPES] = {};
     std::vector<InstanceData> inst_data[NUM_MESH_TYPES];
 
@@ -123,8 +125,15 @@ public:
             "../../assets/models/", "../../../assets/models/"
         };
         for (int i = 0; i < NUM_MESH_TYPES; i++) {
+            // Manifest override takes priority: assets/manifest.json may map this
+            // unit to a specific model file + render scale. Falls back to the
+            // default "<name>.obj" scan if no manifest entry exists.
+            const ModelOverride* mo = g_manifest.model(model_files[i]);
+            std::string filename = (mo && mo->present) ? mo->file
+                                                       : (std::string(model_files[i]) + ".obj");
+            if (mo && mo->present) model_render_scale[i] = mo->scale;
             for (const char* root : asset_roots) {
-                std::string path = std::string(root) + model_files[i] + ".obj";
+                std::string path = std::string(root) + filename;
                 std::ifstream probe(path);
                 if (!probe.good()) continue;       // file not here, try next root
                 probe.close();
@@ -318,6 +327,8 @@ private:
             if (counts[t] == 0) continue;
             uint32_t clamped = std::min(counts[t], (uint32_t)GPUCompute::MAX_INSTANCES_PER_TYPE);
 
+            // Manifest per-unit render scale (bucket 0/1/2 = infantry/cavalry/archer mesh)
+            glUniform1f(glGetUniformLocation(unit_shader,"u_model_scale"), model_render_scale[t]);
             glBindVertexArray(meshes[t].vao);
 
             // Bind GPU instance data from the correct offset in ssbo_instances

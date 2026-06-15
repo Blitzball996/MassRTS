@@ -21,6 +21,7 @@
 #include "game/game_config.h"
 #include "ecs/components.h"
 #include "ai/combat_system.h"
+#include "core/asset_manifest.h"
 #include "ai/movement_system.h"
 #include "render/renderer.h"
 #include "input/camera.h"
@@ -388,6 +389,7 @@ int main(int argc, char* argv[]) {
     Renderer renderer;
     g_renderer = &renderer;
     renderer.set_base_path(exe_path);
+    g_manifest.load(); // data-driven art overrides (optional assets/manifest.json)
     if (!renderer.init(1600, 900)) { fatal_error("Renderer failed"); return -1; }
     g_menu.init(1600, 900);
 

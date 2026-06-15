@@ -51,6 +51,7 @@ int g_buy_count = 1000; // buy in batches of 1000
 
 // --- Terrain sculpt state ---
 bool g_sculpt_mode = false;        // toggle with B
+bool g_victory_enabled = false;    // OFF: endless battle, no win/lose screen
 int  g_sculpt_brush = 1;           // 0=Raise 1=Dig 2=Smooth 3=Flatten
 float g_sculpt_radius = 60.0f;     // world units
 bool g_mouse_held = false;         // left button currently down
@@ -652,8 +653,8 @@ int main(int argc, char* argv[]) {
             if (base_dmg[0] > 0) g_renderer->bases.damage(0, base_dmg[0]);
             if (base_dmg[1] > 0) g_renderer->bases.damage(1, base_dmg[1]);
             // Base destroyed = instant win for the other side
-            if (!g_renderer->bases.bases[0].alive) g_game_state.phase = GamePhase::Defeat;
-            else if (!g_renderer->bases.bases[1].alive) g_game_state.phase = GamePhase::Victory;
+            if (g_victory_enabled && !g_renderer->bases.bases[0].alive) g_game_state.phase = GamePhase::Defeat;
+            else if (g_victory_enabled && !g_renderer->bases.bases[1].alive) g_game_state.phase = GamePhase::Victory;
         } else {
             // CPU fallback
             combat->update_batched(world, dt, ai_batch, 25000);
@@ -669,7 +670,7 @@ int main(int argc, char* argv[]) {
             for (uint32_t i=0; i<world.entity_count; i++) territory_alive[i] = world.is_alive(i) ? 1 : 0;
             g_game_state.update_territory(world.transforms.position, (const uint8_t*)world.units.faction, territory_alive.data(), world.entity_count, dt);
             g_game_state.update(dt);
-            if (g_game_state.check_victory()) g_game_state.phase = g_game_state.get_winner();
+            if (g_victory_enabled && g_game_state.check_victory()) g_game_state.phase = g_game_state.get_winner();
         }
 
         // === Physics ===

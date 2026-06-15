@@ -363,17 +363,33 @@ private:
         // Pick a clip (prefer "walk", else "idle", else first). Per-unit state-based
         // clip switching can be added by drawing sub-ranges; for now whole bucket
         // shares the locomotion clip which already de-syncs per unit via a seed.
-        const AnimClip* clip = sm.clip("walk");
-        if (!clip) clip = sm.clip("idle");
-        if (!clip && !sm.clips.empty()) clip = &sm.clips.begin()->second;
-        if (clip) {
-            glUniform1i(glGetUniformLocation(skinned_shader,"u_clip_start"), clip->start);
-            glUniform1i(glGetUniformLocation(skinned_shader,"u_clip_frames"), clip->frames);
-            glUniform1f(glGetUniformLocation(skinned_shader,"u_clip_fps"), clip->fps);
+        // Default fallback clip (walk -> idle -> first available)
+        const AnimClip* def = sm.clip("walk");
+        if (!def) def = sm.clip("idle");
+        if (!def && !sm.clips.empty()) def = &sm.clips.begin()->second;
+        if (def) {
+            glUniform1i(glGetUniformLocation(skinned_shader,"u_clip_start"), def->start);
+            glUniform1i(glGetUniformLocation(skinned_shader,"u_clip_frames"), def->frames);
+            glUniform1f(glGetUniformLocation(skinned_shader,"u_clip_fps"), def->fps);
         } else {
             glUniform1i(glGetUniformLocation(skinned_shader,"u_clip_frames"), 0);
         }
         glUniform1f(glGetUniformLocation(skinned_shader,"u_anim_phase"), 0.0f);
+
+        // Per-state clip table: state 0=idle 1=walk(moving) 2=attack 3=death.
+        // Maps clip names to unit states; -1 start means "use default clip".
+        const char* state_clip[4] = { "idle", "walk", "attack", "death" };
+        int   st_start[4]; int st_frames[4]; float st_fps[4]; int st_loop[4];
+        for (int s = 0; s < 4; s++) {
+            const AnimClip* c = sm.clip(state_clip[s]);
+            if (c) { st_start[s]=c->start; st_frames[s]=c->frames; st_fps[s]=c->fps; }
+            else   { st_start[s]=-1;       st_frames[s]=0;         st_fps[s]=24.0f; }
+            st_loop[s] = (s == 3) ? 0 : 1;   // death plays once and holds
+        }
+        glUniform1iv(glGetUniformLocation(skinned_shader,"u_state_start"), 4, st_start);
+        glUniform1iv(glGetUniformLocation(skinned_shader,"u_state_frames"), 4, st_frames);
+        glUniform1fv(glGetUniformLocation(skinned_shader,"u_state_fps"), 4, st_fps);
+        glUniform1iv(glGetUniformLocation(skinned_shader,"u_state_loop"), 4, st_loop);
 
         glBindVertexArray(sm.vao); // provides attribs 0-4 (pos/norm/uv/bones/weights)
 

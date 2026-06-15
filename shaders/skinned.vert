@@ -33,6 +33,13 @@ uniform int  u_clip_frames;
 uniform float u_clip_fps;
 uniform float u_anim_phase;     // per-draw time offset into the clip (seconds)
 
+// Per-state clip table (index by unit state: 0=idle 1=walk 2=attack 3=death).
+// start[s] < 0 means "no clip for this state" -> fall back to the default clip.
+uniform int   u_state_start[4];
+uniform int   u_state_frames[4];
+uniform float u_state_fps[4];
+uniform int   u_state_loop[4];  // 1 = loop, 0 = clamp at last frame (death)
+
 out vec3 v_color;
 out vec3 v_normal;
 out vec3 v_world_pos;
@@ -65,21 +72,41 @@ void main() {
     vec3 skinned_pos = a_pos;
     vec3 skinned_norm = a_normal;
 
-    if (u_bone_count > 0 && u_clip_frames > 0) {
-        // current frame within the clip (looping), per-instance phase de-syncs units
-        float seed = fract(sin(a_inst_pos.x*0.13 + a_inst_pos.z*0.71) * 43758.5453);
-        float t = u_time + u_anim_phase + seed * 2.0;
-        int local = int(mod(t * u_clip_fps, float(u_clip_frames)));
-        int frame = u_clip_start + local;
+    if (u_bone_count > 0) {
+        // Pick clip from this unit's state (idle/walk/attack/death). Fall back to
+        // the default clip if the state has no dedicated clip baked in.
+        int s = int(a_inst_state + 0.5);
+        if (s < 0) s = 0; if (s > 3) s = 3;
+        int   c_start  = u_state_start[s];
+        int   c_frames = u_state_frames[s];
+        float c_fps    = u_state_fps[s];
+        int   c_loop   = u_state_loop[s];
+        if (c_start < 0 || c_frames <= 0) {       // no clip for this state
+            c_start = u_clip_start; c_frames = u_clip_frames;
+            c_fps = u_clip_fps;    c_loop = 1;
+        }
 
-        mat4 skin =
-            fetch_bone(int(a_bone_ids.x), frame) * a_bone_weights.x +
-            fetch_bone(int(a_bone_ids.y), frame) * a_bone_weights.y +
-            fetch_bone(int(a_bone_ids.z), frame) * a_bone_weights.z +
-            fetch_bone(int(a_bone_ids.w), frame) * a_bone_weights.w;
+        if (c_frames > 0) {
+            float seed = fract(sin(a_inst_pos.x*0.13 + a_inst_pos.z*0.71) * 43758.5453);
+            float t = u_time + u_anim_phase + seed * 2.0;
+            int local;
+            if (c_loop == 1) {
+                local = int(mod(t * c_fps, float(c_frames)));
+            } else {
+                // play once, hold last frame (e.g. death)
+                local = int(min(t * c_fps, float(c_frames - 1)));
+            }
+            int frame = c_start + local;
 
-        skinned_pos = (skin * vec4(a_pos, 1.0)).xyz;
-        skinned_norm = mat3(skin) * a_normal;
+            mat4 skin =
+                fetch_bone(int(a_bone_ids.x), frame) * a_bone_weights.x +
+                fetch_bone(int(a_bone_ids.y), frame) * a_bone_weights.y +
+                fetch_bone(int(a_bone_ids.z), frame) * a_bone_weights.z +
+                fetch_bone(int(a_bone_ids.w), frame) * a_bone_weights.w;
+
+            skinned_pos = (skin * vec4(a_pos, 1.0)).xyz;
+            skinned_norm = mat3(skin) * a_normal;
+        }
     }
 
     // instance transform: scale -> rotate(Y) -> translate

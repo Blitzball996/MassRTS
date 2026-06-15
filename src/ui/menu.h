@@ -218,6 +218,7 @@ void main() { frag = u_color; }
         glUseProgram(shader);
         glUniform2f(glGetUniformLocation(shader, "u_screen"), (float)screen_w, (float)screen_h);
         glBindVertexArray(vao);
+        glDisable(GL_DEPTH_TEST);
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
         // Dark overlay

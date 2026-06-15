@@ -81,6 +81,36 @@ uint find_nearest_enemy(uint self_idx, vec2 pos, float search_range, uint my_fac
     return best;
 }
 
+// Sample the local battlefield around `pos`: count nearby allies vs enemies
+// (health-weighted) within `radius`. Returns ally strength in .x, enemy in .y.
+// This is the "heatmap" sense the AI uses to decide charge / flank / retreat.
+vec2 local_balance(uint self_idx, vec2 pos, uint my_faction, float radius) {
+    float ally = 0.0;
+    float enemy = 0.0;
+    int search_r = min(int(ceil(radius / CELL_SIZE)), 5);
+    ivec2 my_cell = get_cell(pos);
+    float r2 = radius * radius;
+    for (int dz = -search_r; dz <= search_r; dz++) {
+        for (int dx = -search_r; dx <= search_r; dx++) {
+            int cx = my_cell.x + dx;
+            int cz = my_cell.y + dz;
+            if (cx < 0 || cx >= GRID_DIM || cz < 0 || cz >= GRID_DIM) continue;
+            int cell_id = cz * GRID_DIM + cx;
+            uint count = min(cell_counts[cell_id], uint(MAX_PER_CELL));
+            for (uint i = 0u; i < count; i++) {
+                uint other = cell_entries[cell_id * MAX_PER_CELL + i];
+                if (other >= u_count) continue;
+                UnitData o = units[other];
+                if (o.state >= 3u) continue;            // skip dead/ragdoll
+                vec2 d = o.position - pos;
+                if (dot(d, d) > r2) continue;
+                float w = clamp(o.health * 0.02, 0.2, 2.0);
+                if (o.faction == my_faction) ally += w; else enemy += w;
+            }
+        }
+    }
+    return vec2(ally, enemy);
+}
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= u_count) return;
@@ -95,7 +125,10 @@ void main() {
     units[idx].cooldown = max(u.cooldown - u_dt, 0.0);
 
     // === Retreat check ===
-    float retreat_thresh = (u.type == 5u) ? 0.1 : 0.2;
+    // Cavalry(1)/Samurai(6) are aggressive: only retreat when nearly dead.
+    // Shield(5) holds the line longest. Others retreat at 20% HP.
+    float retreat_thresh = (u.type == 5u) ? 0.1 :
+                           ((u.type == 1u || u.type == 6u) ? 0.08 : 0.2);
     if (u.health < u.max_health * retreat_thresh && u.state != 4u) {
         units[idx].state = 4u;
         units[idx].target = 0xFFFFFFFFu;
@@ -204,16 +237,46 @@ void main() {
         return;
     }
 
-    // Cavalry charge
+    // === Cavalry: tactical behavior driven by local force balance ===
+    // Senses nearby allies vs enemies and chooses charge / flank / regroup.
     if (u.type == 1u) {
-        if (dist > u.range * 1.5) {
-            units[idx].velocity = dir * u.speed * 1.3;
+        vec2 bal = local_balance(idx, u.position, u.faction, 120.0);
+        // ratio > 1 => we outnumber locally; < 1 => outnumbered.
+        float ratio = (bal.x + 1.0) / (bal.y + 1.0);
+        vec2 perp = vec2(-dir.y, dir.x);
+
+        if (ratio < 0.6) {
+            // Badly outnumbered here: pull back toward friendly center to regroup,
+            // but only a tactical fall-back, not a full health-retreat.
+            vec2 to_safety = u_faction_center[u.faction] - u.position;
+            float sd = length(to_safety);
+            vec2 sdir = (sd > 1.0) ? to_safety / sd : -dir;
+            units[idx].velocity = sdir * u.speed * 1.1;
             units[idx].state = 1u;
+            return;
+        } else if (ratio < 1.2) {
+            // Roughly even: flank instead of charging the wall head-on.
+            float side = (float(idx % 2u) == 0.0) ? 1.0 : -1.0;
+            vec2 fdir = normalize(dir + perp * side * 0.8);
+            if (dist > u.range * 1.5) {
+                units[idx].velocity = fdir * u.speed * 1.15;
+                units[idx].state = 1u;
+            } else {
+                units[idx].velocity = dir * u.speed * 0.5;
+                units[idx].state = 2u;
+            }
+            return;
         } else {
-            units[idx].velocity = dir * u.speed * 0.5;
-            units[idx].state = 2u;
+            // We dominate locally: full charge through the enemy.
+            if (dist > u.range * 1.5) {
+                units[idx].velocity = dir * u.speed * 1.4;
+                units[idx].state = 1u;
+            } else {
+                units[idx].velocity = dir * u.speed * 0.5;
+                units[idx].state = 2u;
+            }
+            return;
         }
-        return;
     }
 
     // Samurai charge
@@ -230,6 +293,5 @@ void main() {
     } else {
         units[idx].state = 2u;
         units[idx].velocity = vec2(0.0);
-        // CPU will check cooldown==0 + state==Attacking to execute attack
     }
 }

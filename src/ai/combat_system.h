@@ -231,10 +231,33 @@ public:
         } else if (type == UnitType::Artillery) {
             cooldown = 4.0f; // SLOW fire rate - makes it impactful
             if (proj_sys) {
-                glm::vec2 f2d=world.transforms.position[i], t2d=world.transforms.position[t];
-                float fy = height_fn ? height_fn(f2d.x,f2d.y) : 0.0f;
-                float ty = height_fn ? height_fn(t2d.x,t2d.y) : 0.0f;
-                proj_sys->spawn_cannonball(glm::vec3(f2d.x,fy+5.0f,f2d.y), glm::vec3(t2d.x,ty+1.0f,t2d.y), world.units.faction[i]);
+                glm::vec2 f2d=world.transforms.position[i];
+                glm::vec2 t2d=world.transforms.position[t];
+                int ef = 1 - (int)world.units.faction[i];
+                // --- Aim deeper into enemy mass, away from our own front line ---
+                // Bias the impact point from the target toward the enemy army
+                // center so shells land on packed enemies, not the contested
+                // melee line where our own troops are mixed in.
+                glm::vec2 toward_enemy = faction_center[ef] - t2d;
+                float tl = glm::length(toward_enemy);
+                if (tl > 1.0f) t2d += (toward_enemy / tl) * 35.0f;
+                // --- Spread fire: scatter each piece's aim so a battery doesn't
+                // dogpile one spot. Deterministic per-unit offset. ---
+                float ang = float((i * 2654435761u) & 1023u) / 1024.0f * 6.2831853f;
+                float rad = 20.0f + float((i * 40503u) & 511u) / 511.0f * 45.0f;
+                t2d += glm::vec2(cos(ang), sin(ang)) * rad;
+                // --- Friendly-fire guard: if our own troops are denser than the
+                // enemy's at the impact point, skip this shot (hold fire). ---
+                int ally_near = 0, enemy_near = 0;
+                grid.count_factions_near(t2d, 30.0f, world.units.faction[i],
+                                         world, ally_near, enemy_near);
+                if (ally_near > enemy_near && ally_near > 0) {
+                    cooldown = 0.5f; // try again soon with a fresh target
+                } else {
+                    float fy = height_fn ? height_fn(f2d.x,f2d.y) : 0.0f;
+                    float ty = height_fn ? height_fn(t2d.x,t2d.y) : 0.0f;
+                    proj_sys->spawn_cannonball(glm::vec3(f2d.x,fy+5.0f,f2d.y), glm::vec3(t2d.x,ty+1.0f,t2d.y), world.units.faction[i]);
+                }
             }
         } else if (type == UnitType::Samurai) {
             cooldown = 0.5f;

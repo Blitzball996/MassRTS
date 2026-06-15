@@ -865,6 +865,10 @@ int main(int argc, char* argv[]) {
         if (g_game_state.phase == GamePhase::Victory || g_game_state.phase == GamePhase::Defeat) {
             double emx, emy; glfwGetCursorPos(window, &emx, &emy);
             g_menu.screen_w = g_screen_w; g_menu.screen_h = g_screen_h;
+            // 2D overlay must ignore depth so it always draws over the frozen
+            // battlefield, and must blend so its alpha works.
+            glDisable(GL_DEPTH_TEST);
+            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             g_menu.render_end_screen(g_game_state, g_game_state.phase == GamePhase::Victory, (float)emx, (float)emy);
             if (g_mouse_clicked_this_frame && g_game_state.menu_hover == 0) {
                 g_game_state.phase = GamePhase::Playing;

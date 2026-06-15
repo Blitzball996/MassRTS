@@ -66,7 +66,10 @@ void main() {
     v_local_pos = pos;
     v_local_normal = norm; // This is the key fix - local normal for face detection
 
-    float pixel_scale = (a_inst_scale / 32.0) * u_model_scale;
+    // Safety: if u_model_scale was never set (defaults to 0), treat as 1.0 so
+    // units can never accidentally shrink to nothing.
+    float model_scale = (u_model_scale <= 0.0) ? 1.0 : u_model_scale;
+    float pixel_scale = (a_inst_scale / 32.0) * model_scale;
     pos *= pixel_scale;
 
     // Dead tilt

@@ -275,6 +275,7 @@ public:
         glUniformMatrix4fv(glGetUniformLocation(unit_shader,"u_view"),1,GL_FALSE,&view[0][0]);
         glUniform1f(glGetUniformLocation(unit_shader,"u_time"), game_time);
         glUniformMatrix4fv(glGetUniformLocation(unit_shader,"u_proj"),1,GL_FALSE,&proj[0][0]);
+        glUniform1f(glGetUniformLocation(unit_shader,"u_model_scale"), 1.0f); // decor/bases use full scale
         decor.render(unit_shader);
         bases.render(unit_shader);
 
@@ -550,6 +551,9 @@ private:
 
         for (int t = 0; t < NUM_MESH_TYPES; t++) {
             if (inst_data[t].empty()) continue;
+            // FIX: u_model_scale must be set here too, else it defaults to 0
+            // and units shrink to nothing (steve/villager became invisible).
+            glUniform1f(glGetUniformLocation(unit_shader,"u_model_scale"), model_render_scale[t]);
             glBindVertexArray(meshes[t].vao);
             glBindBuffer(GL_ARRAY_BUFFER, inst_vbo[t]);
             glBufferSubData(GL_ARRAY_BUFFER, 0, inst_data[t].size()*sizeof(InstanceData), inst_data[t].data());

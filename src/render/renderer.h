@@ -9,6 +9,7 @@
 #include "base_system.h"
 #include "model_library.h"
 #include "../core/asset_manifest.h"
+#include "skinned_model.h"
 #include "particles.h"
 #include "projectiles.h"
 #include "gpu_compute.h"
@@ -57,6 +58,8 @@ class Renderer {
 public:
     GLuint unit_shader = 0, terrain_shader = 0, select_shader = 0;
     GLuint particle_shader = 0, billboard_shader = 0, projectile_shader = 0;
+    GLuint skinned_shader = 0;
+    SkinnedModel skinned_models[NUM_MESH_TYPES]; // optional GPU-skinned override per bucket
 
     Mesh meshes[NUM_MESH_TYPES]; // Infantry,Cavalry,Archer,Bomber,Artillery,Shield,Samurai
     float model_render_scale[NUM_MESH_TYPES] = {1,1,1,1,1,1,1,1,1,1}; // manifest per-unit scale
@@ -96,6 +99,7 @@ public:
         select_shader = load_shader(sd+"select.vert", sd+"select.frag");
         particle_shader = load_shader(sd+"particle.vert", sd+"particle.frag");
         billboard_shader = load_shader(sd+"billboard.vert", sd+"billboard.frag");
+        skinned_shader = load_shader(sd+"skinned.vert", sd+"skinned.frag");
         projectile_shader = load_shader(sd+"projectile.vert", sd+"projectile.frag");
         if (!unit_shader || !terrain_shader) return false;
 
@@ -142,6 +146,32 @@ public:
                     if (me && me->mesh.vao) meshes[i] = me->mesh; // override
                 }
                 break; // found this model, stop scanning roots
+            }
+        }
+
+        // --- Optional GPU-skinned models (asset pipeline output) ---
+        // If manifest model "file" ends in .mesh (or a "<name>.mesh" exists),
+        // load it as a skinned model. The skinned draw path then animates it.
+        for (int i = 0; i < NUM_MESH_TYPES; i++) {
+            const ModelOverride* mo = g_manifest.model(model_files[i]);
+            std::string base;
+            if (mo && mo->present) {
+                std::string f = mo->file;
+                size_t dot = f.find_last_of('.');
+                std::string stem = (dot == std::string::npos) ? f : f.substr(0, dot);
+                base = stem;
+            } else {
+                base = model_files[i];
+            }
+            for (const char* root : asset_roots) {
+                std::string mpath = std::string(root) + base + ".mesh";
+                std::ifstream probe(mpath, std::ios::binary);
+                if (!probe.good()) continue;
+                probe.close();
+                if (skinned_models[i].load(std::string(root) + base)) {
+                    if (mo && mo->present) model_render_scale[i] = mo->scale;
+                }
+                break;
             }
         }
 
@@ -305,6 +335,68 @@ public:
     }
 
 private:
+    // Draw one bucket using the GPU-skinned shader + animation texture.
+    // Instance data comes from the same ssbo_instances, bound at locations 5-9
+    // (skinned vertex data occupies 0-4). Clip selection: we feed the unit's
+    // state via a_inst_state and pick the matching clip range below.
+    void draw_skinned_bucket(int t, uint32_t clamped, const glm::mat4& view, const glm::mat4& proj) {
+        SkinnedModel& sm = skinned_models[t];
+        glUseProgram(skinned_shader);
+        glUniformMatrix4fv(glGetUniformLocation(skinned_shader,"u_view"),1,GL_FALSE,&view[0][0]);
+        glUniformMatrix4fv(glGetUniformLocation(skinned_shader,"u_proj"),1,GL_FALSE,&proj[0][0]);
+        glUniform1f(glGetUniformLocation(skinned_shader,"u_time"), game_time);
+        glUniform1f(glGetUniformLocation(skinned_shader,"u_model_scale"), model_render_scale[t]);
+        glm::vec3 ld = glm::normalize(glm::vec3(0.4f, 1.0f, 0.3f));
+        glUniform3f(glGetUniformLocation(skinned_shader,"u_light_dir"), ld.x, ld.y, ld.z);
+        glUniform1i(glGetUniformLocation(skinned_shader,"u_use_texture"), 0);
+
+        // Animation texture + dimensions
+        if (sm.anim_tex) {
+            glActiveTexture(GL_TEXTURE3);
+            glBindTexture(GL_TEXTURE_2D, sm.anim_tex);
+            glUniform1i(glGetUniformLocation(skinned_shader,"u_anim_tex"), 3);
+        }
+        glUniform1i(glGetUniformLocation(skinned_shader,"u_bone_count"), (int)sm.bone_count);
+        glUniform1i(glGetUniformLocation(skinned_shader,"u_anim_width"), sm.anim_tex_width);
+        glUniform1i(glGetUniformLocation(skinned_shader,"u_anim_height"), sm.anim_tex_height);
+
+        // Pick a clip (prefer "walk", else "idle", else first). Per-unit state-based
+        // clip switching can be added by drawing sub-ranges; for now whole bucket
+        // shares the locomotion clip which already de-syncs per unit via a seed.
+        const AnimClip* clip = sm.clip("walk");
+        if (!clip) clip = sm.clip("idle");
+        if (!clip && !sm.clips.empty()) clip = &sm.clips.begin()->second;
+        if (clip) {
+            glUniform1i(glGetUniformLocation(skinned_shader,"u_clip_start"), clip->start);
+            glUniform1i(glGetUniformLocation(skinned_shader,"u_clip_frames"), clip->frames);
+            glUniform1f(glGetUniformLocation(skinned_shader,"u_clip_fps"), clip->fps);
+        } else {
+            glUniform1i(glGetUniformLocation(skinned_shader,"u_clip_frames"), 0);
+        }
+        glUniform1f(glGetUniformLocation(skinned_shader,"u_anim_phase"), 0.0f);
+
+        glBindVertexArray(sm.vao); // provides attribs 0-4 (pos/norm/uv/bones/weights)
+
+        // Instance data at locations 5-9 from ssbo_instances bucket offset
+        glBindBuffer(GL_ARRAY_BUFFER, gpu_compute.ssbo_instances);
+        size_t offset = (size_t)t * GPUCompute::MAX_INSTANCES_PER_TYPE * sizeof(InstanceData);
+        size_t s = sizeof(InstanceData);
+        glVertexAttribPointer(5,3,GL_FLOAT,GL_FALSE,s,(void*)(offset + offsetof(InstanceData,position)));
+        glEnableVertexAttribArray(5); glVertexAttribDivisor(5,1);
+        glVertexAttribPointer(6,3,GL_FLOAT,GL_FALSE,s,(void*)(offset + offsetof(InstanceData,color)));
+        glEnableVertexAttribArray(6); glVertexAttribDivisor(6,1);
+        glVertexAttribPointer(7,1,GL_FLOAT,GL_FALSE,s,(void*)(offset + offsetof(InstanceData,scale)));
+        glEnableVertexAttribArray(7); glVertexAttribDivisor(7,1);
+        glVertexAttribPointer(8,1,GL_FLOAT,GL_FALSE,s,(void*)(offset + offsetof(InstanceData,rotation)));
+        glEnableVertexAttribArray(8); glVertexAttribDivisor(8,1);
+        glVertexAttribPointer(9,1,GL_FLOAT,GL_FALSE,s,(void*)(offset + offsetof(InstanceData,state)));
+        glEnableVertexAttribArray(9); glVertexAttribDivisor(9,1);
+
+        glDrawElementsInstanced(GL_TRIANGLES, sm.index_count, GL_UNSIGNED_INT, 0, (int)clamped);
+        glBindVertexArray(0);
+        glActiveTexture(GL_TEXTURE0);
+    }
+
     void render_gpu_path(const World& world, const glm::mat4& view, const glm::mat4& proj, glm::vec3 cam_pos) {
         Frustum frustum;
         frustum.extract(proj * view);
@@ -326,6 +418,13 @@ private:
         for (int t = 0; t < 3; t++) {
             if (counts[t] == 0) continue;
             uint32_t clamped = std::min(counts[t], (uint32_t)GPUCompute::MAX_INSTANCES_PER_TYPE);
+
+            // --- GPU-skinned path (asset pipeline models with animations) ---
+            if (skinned_models[t].valid && skinned_shader) {
+                draw_skinned_bucket(t, clamped, view, proj);
+                glUseProgram(unit_shader); // restore for next non-skinned bucket
+                continue;
+            }
 
             // Manifest per-unit render scale (bucket 0/1/2 = infantry/cavalry/archer mesh)
             glUniform1f(glGetUniformLocation(unit_shader,"u_model_scale"), model_render_scale[t]);

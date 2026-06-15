@@ -705,6 +705,14 @@ int main(int argc, char* argv[]) {
                                                          : (is_nuke ? 260.0f : 90.0f);
                 world.apply_explosion(hit.position, hit.radius, force,
                                       hit.damage, hit.source_faction);
+                // Carve a crater into the terrain at the impact point so blasts
+                // leave a lasting mark. Cannon = small dent, nuke = deep crater.
+                {
+                    float crater_r = hit.radius * 0.6f;
+                    float crater_depth = is_nuke ? 16.0f : 3.0f;
+                    renderer.terrain.sculpt(hit.position.x, hit.position.z,
+                                            crater_r, crater_depth, Terrain::Brush::Dig);
+                }
             }
         }
 
@@ -764,7 +772,14 @@ int main(int argc, char* argv[]) {
         float aspect = (float)g_screen_w / (float)g_screen_h;
         glm::mat4 view = g_camera.get_view();
         glm::mat4 proj = g_camera.get_projection(aspect);
-        if (g_game_state.phase == GamePhase::Playing) { renderer.render(world, view, proj, g_camera.get_position()); } else { glClearColor(0.05f, 0.05f, 0.1f, 1.0f); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); }
+        // Render the battlefield whenever we're in-game OR on the end screen.
+        // The Victory/Defeat overlay draws ON TOP of the frozen battlefield so
+        // the player sees the final battle state instead of a black screen.
+        bool draw_world = (g_game_state.phase == GamePhase::Playing ||
+                           g_game_state.phase == GamePhase::Victory ||
+                           g_game_state.phase == GamePhase::Defeat);
+        if (draw_world) { renderer.render(world, view, proj, g_camera.get_position()); }
+        else { glClearColor(0.05f, 0.05f, 0.1f, 1.0f); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); }
 
         // Selection box
         if (g_selecting) {

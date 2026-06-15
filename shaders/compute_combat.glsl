@@ -53,7 +53,7 @@ ivec2 get_cell(vec2 pos) {
 uint find_nearest_enemy(uint self_idx, vec2 pos, float search_range, uint my_faction) {
     uint best = 0xFFFFFFFFu;
     float best_dist2 = search_range * search_range;
-    int search_r = min(int(ceil(search_range / CELL_SIZE)), 20);
+    int search_r = min(int(ceil(search_range / CELL_SIZE)), 7);
     ivec2 my_cell = get_cell(pos);
 
     for (int dz = -search_r; dz <= search_r; dz++) {

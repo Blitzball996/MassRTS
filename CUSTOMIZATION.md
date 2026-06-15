@@ -221,3 +221,74 @@ shaders/
   compute_units.glsl        - 实例数据生成
   unit.vert/frag            - 单位着色器(改表情在frag里)
 ```
+
+
+### 高面模型优化（重要）
+
+引擎已内置三层优化：
+1. 视锥剔除 — gpu_compute.h 的 compute shader 自动丢弃屏幕外单位。
+2. LOD 距离切换 — renderer.h 的 lod_distance：近处画完整网格，超距自动切 billboard。5万单位能跑的关键。
+3. GPU 实例化 — 每种兵种一次 draw call。
+
+导入高面 OBJ：
+    meshes[0] = ObjLoader::load("assets/models/infantry_high.obj");
+    lod_distance = 150.0f;  // 高面建议 100~150
+经验：屏幕内可见高模总面数控制在 ~500万三角形内，其余靠 LOD 降级。
+
+---
+
+## 自定义场景 / 地形
+
+地形在 src/render/terrain.h 程序化生成（多层噪声 + 生物群系着色），不是贴图。
+- 高度/地貌：改 terrain.h 的 regen()/generate_with_seed() 噪声参数
+- 配色：改 shaders/terrain.frag 按高度/坡度混色
+- 水面：shaders/terrain.vert 第20行 Water surface animation
+- 加贴图：terrain.frag 加 sampler2D，terrain.h 上传纹理
+- 场景道具(树/石/建筑)：放 assets/models/，加载同兵种 OBJ，务必走实例化+LOD
+
+---
+
+## 自定义视觉特效 / 粒子
+
+粒子在 src/render/particles.h（CPU spawn，GPU 绘制）。已有预设：
+    spawn_cannon_blast(pos)   // 大炮爆炸
+    spawn_nuke_blast(pos)     // 核弹蘑菇云
+
+炮弹轨迹：独立系统，shader 为 shaders/projectile.vert/frag
+- 轨迹外观：改 projectile.frag（颜色/发光/衰减）
+- 落点特效：命中时调用 particles.spawn_cannon_blast(impact_pos)
+
+新增特效：仿照 spawn_cannon_blast 写 spawn_my_fx()，整体风格在 shaders/particle.frag。
+
+---
+
+## 自定义动画
+
+当前是顶点着色器程序化动画（无骨骼），在 shaders/unit.vert：
+- 每顶点带 part_id（身/头/臂/腿）和 pivot_y（旋转轴）
+- 按 u_time 给四肢正弦摆动
+
+改动画（unit.vert 第42行附近）：
+    float anim_time = u_time * 3.5 + seed;  // 摆动速度
+    swing = sin(anim_time) * 0.5;            // 腿摆幅度
+    if (u_state > 1.5) arm_swing = sin(u_time*12.0)*1.2; // 攻击挥砍
+
+真骨骼动画需较大改造（glTF/FBX 骨骼 + 骨骼矩阵 SSBO + 蒙皮），建议仅近处 LOD 用。
+
+---
+
+## 能否接入 UE5 做成插件？
+
+简短回答：不能直接接，但核心思路可迁移。
+
+本项目是独立 C++/OpenGL 引擎，UE5 用自己的 RHI 和渲染框架，OpenGL 代码无法直接塞入。
+
+可行迁移路线：
+1. compute_*.glsl 移植成 UE5 的 .usf Compute Shader（逻辑近 1:1 翻译）
+2. 单位渲染改用 UE5 的 HISM 或 Niagara（自带 LOD/剔除）
+3. balance_config.h 改成 UE5 DataAsset
+4. 用 UE5 自带的 MassEntity 框架承载海量实体（最契合）
+
+属于移植而非封装插件，工作量数周级别。蹭画质走 MassEntity+Niagara，要极致性能则保留自研引擎。
+
+---

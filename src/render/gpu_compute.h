@@ -338,6 +338,7 @@ public:
         glUniform2f(glGetUniformLocation(combat_shader, "u_faction_center[1]"), faction_center[1].x, faction_center[1].y);
         glUniform1ui(glGetUniformLocation(combat_shader, "u_faction_alive[0]"), faction_alive[0]);
         glUniform1ui(glGetUniformLocation(combat_shader, "u_faction_alive[1]"), faction_alive[1]);
+        glUniform1ui(glGetUniformLocation(combat_shader, "u_frame"), frame);
         glDispatchCompute(groups, 1, 1);
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 

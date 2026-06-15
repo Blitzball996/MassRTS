@@ -469,10 +469,10 @@ int main(int argc, char* argv[]) {
             {
                 FILE* dlog = fopen("diag.log", "a");
                 if (dlog) {
-                    fprintf(dlog, "t=%.0f fps=%d ent=%u live=%u proj=%zu | grid=%.1f upload=%.1f disp=%.1f read=%.1f (ms/s)\n",
+                    fprintf(dlog, "t=%.0f fps=%d ent=%u live=%u proj=%zu | grid=%.1f upload=%.1f disp=%.1f read=%.1f cpu=%.1f (ms/s)\n",
                             now, frame_count, world.entity_count, world.live_count,
                             renderer.projectiles.projectiles.size(),
-                            tm_grid*1000, tm_upload*1000, tm_dispatch*1000, tm_readback*1000);
+                            tm_grid*1000, tm_upload*1000, tm_dispatch*1000, tm_readback*1000, tm_cpu*1000);
                     tm_grid=tm_upload=tm_dispatch=tm_readback=tm_cpu=0;
                     fclose(dlog);
                 }
@@ -598,6 +598,7 @@ int main(int argc, char* argv[]) {
             // (Projectiles are now spawned inside CombatSystem::perform_attack at the
             //  correct terrain height; the old rising-edge detector was removed.)
 
+            double _tcpu=glfwGetTime();
             // CPU executes attacks (damage, projectiles, effects, death)
             for (uint32_t i = 0; i < world.entity_count; i++) {
                 if (!world.is_alive(i)) continue;
@@ -650,6 +651,7 @@ int main(int argc, char* argv[]) {
                     base_dmg[enemy_base] += world.units.attack_damage[i] * dt;
                 }
             }
+            tm_cpu += glfwGetTime()-_tcpu;
             if (base_dmg[0] > 0) g_renderer->bases.damage(0, base_dmg[0]);
             if (base_dmg[1] > 0) g_renderer->bases.damage(1, base_dmg[1]);
             // Base destroyed = instant win for the other side

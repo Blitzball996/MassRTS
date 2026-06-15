@@ -42,6 +42,7 @@ uniform uint u_count;
 uniform float u_dt;
 uniform vec2 u_faction_center[2];
 uniform uint u_faction_alive[2];
+uniform uint u_frame;
 
 ivec2 get_cell(vec2 pos) {
     return ivec2(
@@ -53,7 +54,7 @@ ivec2 get_cell(vec2 pos) {
 uint find_nearest_enemy(uint self_idx, vec2 pos, float search_range, uint my_faction) {
     uint best = 0xFFFFFFFFu;
     float best_dist2 = search_range * search_range;
-    int search_r = min(int(ceil(search_range / CELL_SIZE)), 7);
+    int search_r = min(int(ceil(search_range / CELL_SIZE)), 3); // cap radius: dense battles have enemies within ~3 cells; was 7
     ivec2 my_cell = get_cell(pos);
 
     for (int dz = -search_r; dz <= search_r; dz++) {
@@ -87,7 +88,7 @@ uint find_nearest_enemy(uint self_idx, vec2 pos, float search_range, uint my_fac
 vec2 local_balance(uint self_idx, vec2 pos, uint my_faction, float radius) {
     float ally = 0.0;
     float enemy = 0.0;
-    int search_r = min(int(ceil(radius / CELL_SIZE)), 5);
+    int search_r = min(int(ceil(radius / CELL_SIZE)), 3); // cavalry local sense: 3 cells enough; was 5
     ivec2 my_cell = get_cell(pos);
     float r2 = radius * radius;
     for (int dz = -search_r; dz <= search_r; dz++) {
@@ -171,8 +172,13 @@ void main() {
         }
     }
 
-    // === Find new target ===
-    if (tgt == 0xFFFFFFFFu) {
+    // === Find new target (frame-staggered) ===
+    // The neighbor search is the most expensive part of this shader. Units
+    // without a target only search on their assigned frame slot, spreading the
+    // cost across STAGGER frames. Off-slot units fall through to the idle/march
+    // behavior below, so they keep advancing toward the enemy meanwhile.
+    const uint STAGGER = 4u;
+    if (tgt == 0xFFFFFFFFu && ((idx + u_frame) % STAGGER == 0u)) {
         float search = (u.type == 4u) ? 600.0 : 500.0;
         tgt = find_nearest_enemy(idx, u.position, search, u.faction);
         units[idx].target = tgt;

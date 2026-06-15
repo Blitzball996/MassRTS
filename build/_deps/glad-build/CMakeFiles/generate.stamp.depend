@@ -1,0 +1,6 @@
+# CMake generation dependency list for this directory.
+G:/CMakePJ/MassRTS/build/_deps/glad-src/CMakeLists.txt
+G:/Cmake/share/cmake-3.31/Modules/FindPackageHandleStandardArgs.cmake
+G:/Cmake/share/cmake-3.31/Modules/FindPackageMessage.cmake
+G:/Cmake/share/cmake-3.31/Modules/FindPython.cmake
+G:/Cmake/share/cmake-3.31/Modules/FindPython/Support.cmake

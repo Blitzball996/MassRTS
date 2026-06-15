@@ -1,0 +1,18 @@
+# CMake generation dependency list for this directory.
+G:/CMakePJ/MassRTS/build/_deps/glfw-src/CMakeLists.txt
+G:/CMakePJ/MassRTS/build/_deps/glfw-src/cmake_uninstall.cmake.in
+G:/CMakePJ/MassRTS/build/_deps/glfw-src/src/glfw3.pc.in
+G:/CMakePJ/MassRTS/build/_deps/glfw-src/src/glfw3Config.cmake.in
+G:/CMakePJ/MassRTS/build/_deps/glfw-src/src/glfw_config.h.in
+G:/Cmake/share/cmake-3.31/Modules/BasicConfigVersion-SameMajorVersion.cmake.in
+G:/Cmake/share/cmake-3.31/Modules/CMakeDependentOption.cmake
+G:/Cmake/share/cmake-3.31/Modules/CMakePackageConfigHelpers.cmake
+G:/Cmake/share/cmake-3.31/Modules/CheckCSourceCompiles.cmake
+G:/Cmake/share/cmake-3.31/Modules/CheckIncludeFile.cmake
+G:/Cmake/share/cmake-3.31/Modules/CheckLibraryExists.cmake
+G:/Cmake/share/cmake-3.31/Modules/FindPackageHandleStandardArgs.cmake
+G:/Cmake/share/cmake-3.31/Modules/FindPackageMessage.cmake
+G:/Cmake/share/cmake-3.31/Modules/FindThreads.cmake
+G:/Cmake/share/cmake-3.31/Modules/GNUInstallDirs.cmake
+G:/Cmake/share/cmake-3.31/Modules/Internal/CheckSourceCompiles.cmake
+G:/Cmake/share/cmake-3.31/Modules/WriteBasicConfigVersionFile.cmake

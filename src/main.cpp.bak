@@ -1,0 +1,188 @@
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+#include <glm/glm.hpp>
+#include <iostream>
+#include <random>
+#include <chrono>
+#include <cstring>
+#include <cstdio>
+
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#endif
+
+void fatal_error(const char* msg) {
+    std::cerr << msg << std::endl;
+    std::cerr.flush();
+#ifdef _WIN32
+    MessageBoxA(NULL, msg, "MassRTS Error", MB_OK | MB_ICONERROR);
+#endif
+}
+
+#include "ecs/world.h"
+#include "ecs/components.h"
+#include "ai/combat_system.h"
+#include "ai/movement_system.h"
+#include "render/renderer.h"
+#include "input/camera.h"
+
+// Globals for callbacks
+Camera g_camera;
+
+void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
+    g_camera.on_scroll(yoffset);
+}
+
+void spawn_army(World& world, Faction faction, glm::vec2 center, int count, glm::vec3 color) {
+    std::mt19937 rng(static_cast<uint32_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count()) + (int)faction);
+    std::uniform_real_distribution<float> spread(-300.0f, 300.0f);
+    std::uniform_real_distribution<float> type_roll(0.0f, 1.0f);
+
+    for (int i = 0; i < count; i++) {
+        Entity e = world.create_entity();
+        if (e == INVALID_ENTITY) break;
+
+        world.transforms.position[e] = center + glm::vec2(spread(rng), spread(rng));
+        world.transforms.velocity[e] = {0, 0};
+        world.transforms.rotation[e] = 0;
+
+        world.units.faction[e] = faction;
+        world.units.state[e] = UnitState::Idle;
+        world.units.target[e] = INVALID_ENTITY;
+
+        float roll = type_roll(rng);
+        if (roll < 0.6f) {
+            world.units.type[e] = UnitType::Infantry;
+            world.units.health[e] = 100.0f;
+            world.units.attack_damage[e] = 10.0f;
+            world.units.attack_range[e] = 3.0f;
+            world.units.speed[e] = 30.0f;
+            world.renders.scale[e] = 2.0f;
+        } else if (roll < 0.8f) {
+            world.units.type[e] = UnitType::Cavalry;
+            world.units.health[e] = 150.0f;
+            world.units.attack_damage[e] = 20.0f;
+            world.units.attack_range[e] = 4.0f;
+            world.units.speed[e] = 60.0f;
+            world.renders.scale[e] = 3.0f;
+        } else {
+            world.units.type[e] = UnitType::Archer;
+            world.units.health[e] = 60.0f;
+            world.units.attack_damage[e] = 15.0f;
+            world.units.attack_range[e] = 40.0f;
+            world.units.speed[e] = 25.0f;
+            world.renders.scale[e] = 1.8f;
+        }
+
+        world.units.attack_cooldown[e] = 0;
+        world.renders.color[e] = color;
+    }
+}
+
+int main(int argc, char* argv[]) {
+    std::string exe_path = argv[0];
+    if (!glfwInit()) {
+        fatal_error("Failed to init GLFW");
+        return -1;
+    }
+
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+
+    GLFWwindow* window = glfwCreateWindow(1920, 1080, "MassRTS - 100K Units", nullptr, nullptr);
+    if (!window) {
+        fatal_error("Failed to create window");
+        glfwTerminate();
+        return -1;
+    }
+
+    glfwMakeContextCurrent(window);
+    glfwSetScrollCallback(window, scroll_callback);
+    glfwSwapInterval(0); // Uncapped FPS for benchmarking
+
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
+        fatal_error("Failed to init GLAD");
+        return -1;
+    }
+
+    std::cout << "OpenGL: " << glGetString(GL_VERSION) << "\n";
+    std::cout << "GPU: " << glGetString(GL_RENDERER) << "\n";
+
+    // Init systems (heap allocated - too large for stack)
+    World* world_ptr = new World();
+    World& world = *world_ptr;
+    Renderer renderer;
+    CombatSystem* combat_ptr = new CombatSystem();
+    CombatSystem& combat = *combat_ptr;
+    MovementSystem movement;
+
+    renderer.set_base_path(exe_path);
+    if (!renderer.init(1920, 1080)) {
+        fatal_error("Failed to init renderer (shader load failed)");
+        return -1;
+    }
+
+    // Spawn armies - 50K per side
+    std::cout << "Spawning 100,000 units...\n";
+    spawn_army(world, Faction::Red, {-400, 0}, 50000, {0.9f, 0.2f, 0.2f});
+    spawn_army(world, Faction::Blue, {400, 0}, 50000, {0.2f, 0.4f, 0.9f});
+    std::cout << "Spawned " << world.entity_count << " units\n";
+
+    // Main loop
+    double last_time = glfwGetTime();
+    int frame_count = 0;
+    double fps_timer = 0;
+
+    while (!glfwWindowShouldClose(window)) {
+        double now = glfwGetTime();
+        float dt = (float)(now - last_time);
+        last_time = now;
+        if (dt > 0.1f) dt = 0.1f; // Clamp delta
+
+        // FPS counter
+        frame_count++;
+        fps_timer += dt;
+        if (fps_timer >= 1.0) {
+            char title[128];
+            snprintf(title, sizeof(title), "MassRTS | FPS: %d | Units: %d",
+                frame_count, world.entity_count);
+            glfwSetWindowTitle(window, title);
+            frame_count = 0;
+            fps_timer = 0;
+        }
+
+        // Input
+        glfwPollEvents();
+        if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+            glfwSetWindowShouldClose(window, true);
+
+        g_camera.update(window, dt);
+
+        // Update game logic
+        combat.update(world, dt);
+        movement.update(world, dt);
+
+        // Render
+        int w, h;
+        glfwGetFramebufferSize(window, &w, &h);
+        glViewport(0, 0, w, h);
+        
+        renderer.camera_pos = g_camera.position;
+        renderer.camera_zoom = g_camera.zoom;
+        renderer.screen_width = w;
+        renderer.screen_height = h;
+        renderer.render(world);
+
+        glfwSwapBuffers(window);
+    }
+
+    renderer.cleanup();
+    delete combat_ptr;
+    delete world_ptr;
+    glfwDestroyWindow(window);
+    glfwTerminate();
+    return 0;
+}

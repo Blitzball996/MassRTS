@@ -1,0 +1,333 @@
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <iostream>
+#include <random>
+#include <cstring>
+#include <cstdio>
+#include <cmath>
+#include <vector>
+#include <algorithm>
+#include <thread>
+#include <atomic>
+
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#endif
+
+#include "ecs/world.h"
+#include "ecs/components.h"
+#include "ai/combat_system.h"
+#include "ai/movement_system.h"
+#include "render/renderer.h"
+#include "input/camera.h"
+#include "ui/hud.h"
+
+// Globals
+Camera g_camera;
+bool g_selecting = false;
+glm::vec2 g_select_start = {0, 0};
+int g_screen_w = 1600, g_screen_h = 900;
+World* g_world = nullptr;
+Renderer* g_renderer = nullptr;
+
+void fatal_error(const char* msg) {
+    std::cerr << msg << std::endl;
+#ifdef _WIN32
+    MessageBoxA(NULL, msg, "MassRTS Error", MB_OK | MB_ICONERROR);
+#endif
+}
+
+void scroll_callback(GLFWwindow* w, double x, double y) { g_camera.on_scroll(y); }
+
+void mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
+    double mx, my;
+    glfwGetCursorPos(window, &mx, &my);
+    World& world = *g_world;
+
+    if (button == GLFW_MOUSE_BUTTON_LEFT) {
+        if (action == GLFW_PRESS) {
+            g_selecting = true;
+            g_select_start = {(float)mx, (float)my};
+        } else if (action == GLFW_RELEASE && g_selecting) {
+            g_selecting = false;
+            glm::vec2 end_screen = {(float)mx, (float)my};
+
+            Ray r1 = g_camera.screen_to_ray(g_select_start.x, g_select_start.y, g_screen_w, g_screen_h);
+            Ray r2 = g_camera.screen_to_ray(end_screen.x, end_screen.y, g_screen_w, g_screen_h);
+            glm::vec2 w1 = g_camera.ray_to_ground(r1);
+            glm::vec2 w2 = g_camera.ray_to_ground(r2);
+            glm::vec2 box_min = glm::min(w1, w2);
+            glm::vec2 box_max = glm::max(w1, w2);
+
+            // Deselect all
+            for (uint32_t i = 0; i < world.entity_count; i++)
+                world.selection.selected[i] = false;
+
+            float area = (box_max.x - box_min.x) * (box_max.y - box_min.y);
+            if (area < 100.0f) {
+                // Click: select nearest player unit
+                glm::vec2 click = (w1 + w2) * 0.5f;
+                float best = 400.0f; Entity be = INVALID_ENTITY;
+                for (uint32_t i = 0; i < world.entity_count; i++) {
+                    if (!world.is_alive(i) || !world.selection.player_owned[i]) continue;
+                    float d = glm::length(world.transforms.position[i] - click);
+                    if (d < best) { best = d; be = i; }
+                }
+                if (be != INVALID_ENTITY) world.selection.selected[be] = true;
+            } else {
+                // Box select
+                for (uint32_t i = 0; i < world.entity_count; i++) {
+                    if (!world.is_alive(i) || !world.selection.player_owned[i]) continue;
+                    glm::vec2 p = world.transforms.position[i];
+                    if (p.x >= box_min.x && p.x <= box_max.x && p.y >= box_min.y && p.y <= box_max.y)
+                        world.selection.selected[i] = true;
+                }
+            }
+        }
+    }
+
+    if (button == GLFW_MOUSE_BUTTON_RIGHT && action == GLFW_PRESS) {
+        Ray ray = g_camera.screen_to_ray((float)mx, (float)my, g_screen_w, g_screen_h);
+        glm::vec2 target = g_camera.ray_to_ground(ray);
+
+        std::vector<Entity> selected;
+        for (uint32_t i = 0; i < world.entity_count; i++)
+            if (world.selection.selected[i] && world.is_alive(i))
+                selected.push_back(i);
+
+        if (!selected.empty()) {
+            int cols = std::max(1, (int)sqrt((float)selected.size()));
+            float spacing = 6.0f;
+            for (size_t idx = 0; idx < selected.size(); idx++) {
+                Entity e = selected[idx];
+                int row = (int)idx / cols, col = (int)idx % cols;
+                float ox = ((float)col - cols * 0.5f) * spacing;
+                float oy = ((float)row - (float)(selected.size() / cols) * 0.5f) * spacing;
+                world.commands.move_target[e] = target + glm::vec2(ox, oy);
+                world.commands.has_move_command[e] = true;
+                world.units.target[e] = INVALID_ENTITY;
+                world.units.state[e] = UnitState::Moving;
+            }
+        }
+    }
+}
+
+void spawn_army(World& world, Faction faction, glm::vec2 center, int count,
+                glm::vec3 color, bool player_owned) {
+    std::mt19937 rng(42 + (uint32_t)faction * 7777);
+    int infantry_n = (int)(count * 0.45f);
+    int cavalry_n = (int)(count * 0.18f);
+    int archer_n = (int)(count * 0.22f);
+    int bomber_n = (int)(count * 0.08f);
+    int artillery_n = count - infantry_n - cavalry_n - archer_n - bomber_n;
+    float sign = (faction == Faction::Red) ? 1.0f : -1.0f;
+
+    auto spawn_block = [&](int n, UnitType type, glm::vec2 offset,
+                           float hp, float dmg, float range, float spd, float scl) {
+        int cols = std::max(1, (int)sqrt((float)n * 2.0f));
+        float spacing = 6.5f;
+        std::uniform_real_distribution<float> jit(-1.0f, 1.0f);
+        for (int i = 0; i < n; i++) {
+            Entity e = world.create_entity();
+            if (e == INVALID_ENTITY) return;
+            int row = i / cols, col = i % cols;
+            glm::vec2 pos = center + offset + glm::vec2(
+                (col - cols * 0.5f) * spacing + jit(rng),
+                (row - (n/cols) * 0.5f) * spacing + jit(rng));
+            world.transforms.position[e] = pos;
+            world.transforms.velocity[e] = {0, 0};
+            world.transforms.rotation[e] = (faction == Faction::Red) ? 0.0f : 3.14159f;
+            world.units.faction[e] = faction;
+            world.units.type[e] = type;
+            world.units.state[e] = UnitState::Idle;
+            world.units.health[e] = hp;
+            world.units.max_health[e] = hp;
+            world.units.attack_damage[e] = dmg;
+            world.units.attack_range[e] = range;
+            world.units.speed[e] = spd;
+            world.units.attack_cooldown[e] = 0;
+            world.units.target[e] = INVALID_ENTITY;
+            world.renders.color[e] = color;
+            world.renders.scale[e] = scl;
+            world.selection.player_owned[e] = player_owned;
+            world.selection.selected[e] = false;
+            world.commands.has_move_command[e] = false;
+        }
+    };
+
+    spawn_block(infantry_n, UnitType::Infantry, {0, 0}, 100, 10, 8, 6, 2.0f);
+    spawn_block(archer_n, UnitType::Archer, {0, -120*sign}, 60, 12, 80, 4, 1.8f);
+    spawn_block(cavalry_n/2, UnitType::Cavalry, {-200, 60*sign}, 150, 18, 8, 12, 2.5f);
+    spawn_block(cavalry_n/2, UnitType::Cavalry, {200, 60*sign}, 150, 18, 8, 12, 2.5f);
+    spawn_block(bomber_n, UnitType::Bomber, {0, 50*sign}, 80, 80, 12, 5, 2.2f);
+    spawn_block(artillery_n, UnitType::Artillery, {0, -200*sign}, 70, 40, 180, 2, 2.8f);
+}
+
+int main(int argc, char* argv[]) {
+    std::string exe_path = argv[0];
+    if (!glfwInit()) { fatal_error("GLFW failed"); return -1; }
+
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_SAMPLES, 4);
+
+    GLFWwindow* window = glfwCreateWindow(1600, 900, "MassRTS 3D", nullptr, nullptr);
+    if (!window) { fatal_error("Window failed"); glfwTerminate(); return -1; }
+
+    glfwMakeContextCurrent(window);
+    glfwSetScrollCallback(window, scroll_callback);
+    glfwSetMouseButtonCallback(window, mouse_button_callback);
+    glfwSwapInterval(1);
+
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) { fatal_error("GLAD failed"); return -1; }
+    glEnable(GL_MULTISAMPLE);
+    std::cout << "OpenGL: " << glGetString(GL_VERSION) << "\n";
+    std::cout << "GPU: " << glGetString(GL_RENDERER) << "\n";
+
+    World* world_ptr = new World();
+    g_world = world_ptr;
+    World& world = *world_ptr;
+
+    Renderer renderer;
+    g_renderer = &renderer;
+    renderer.set_base_path(exe_path);
+    if (!renderer.init(1600, 900)) { fatal_error("Renderer failed"); return -1; }
+
+    CombatSystem* combat = new CombatSystem();
+    MovementSystem movement;
+    UI hud;
+    hud.init(1600, 900);
+
+    std::cout << "Deploying armies...\n";
+    spawn_army(world, Faction::Red, {-400, 0}, 16000, {0.25f, 0.3f, 0.2f}, true);
+    spawn_army(world, Faction::Blue, {400, 0}, 16000, {0.4f, 0.35f, 0.15f}, false);
+    std::cout << "Deployed " << world.entity_count << " units\n";
+
+    // Initial upload of all unit data to GPU
+    renderer.gpu_upload_units(world);
+
+    g_camera.target = {0, 20, 0};
+    g_camera.distance = 800.0f;
+    g_camera.pitch = 50.0f;
+
+    double last_time = glfwGetTime();
+    int frame_count = 0;
+    double fps_timer = 0;
+    uint32_t ai_batch = 0;
+
+    while (!glfwWindowShouldClose(window)) {
+        double now = glfwGetTime();
+        float dt = std::min((float)(now - last_time), 0.05f);
+        last_time = now;
+
+        frame_count++;
+        fps_timer += dt;
+        if (fps_timer >= 1.0) {
+            hud.fps = frame_count;
+            char title[128];
+            snprintf(title, 128, "MassRTS 3D | FPS: %d | Units: %u", frame_count, world.entity_count);
+            glfwSetWindowTitle(window, title);
+            frame_count = 0;
+            fps_timer = 0;
+        }
+
+        glfwPollEvents();
+        if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+            glfwSetWindowShouldClose(window, true);
+
+        glfwGetFramebufferSize(window, &g_screen_w, &g_screen_h);
+        g_camera.update(window, dt);
+
+        // Game logic
+        // GPU compute path: positions live on GPU, only readback the batch we need for AI
+        if (renderer.is_gpu_compute()) {
+            // Readback positions for the AI batch only
+            renderer.gpu_readback_positions(world, ai_batch, 25000);
+            // Run AI (target finding, state changes) on CPU — operates on batch
+            combat->update_batched(world, dt, ai_batch, 25000);
+            // Upload AI decisions (velocity/state changes) back to GPU
+            renderer.gpu_upload_batch(world, ai_batch, 25000);
+            ai_batch += 25000;
+            if (ai_batch >= world.entity_count) ai_batch = 0;
+            // Movement is done by compute shader — skip CPU movement entirely
+        } else {
+            combat->update_batched(world, dt, ai_batch, 25000);
+            ai_batch += 25000;
+            if (ai_batch >= world.entity_count) ai_batch = 0;
+            movement.update(world, dt, combat->grid);
+            world.tick_corpses(dt);
+        }
+
+        // Spawn combat particles for attacking units (sample a few)
+        for (uint32_t i = ai_batch > 15000 ? ai_batch - 15000 : 0; i < ai_batch && i < world.entity_count; i += 50) {
+            if (world.is_alive(i) && world.units.state[i] == UnitState::Attacking && world.units.attack_cooldown[i] > 0.7f) {
+                glm::vec3 col = world.renders.color[i];
+                renderer.spawn_hit_particles(world.transforms.position[i], col);
+            }
+        }
+        renderer.update(dt);
+
+        // Count stats for HUD — selection breakdown by type
+        int sel = 0, sel_inf = 0, sel_cav = 0, sel_arc = 0;
+        for (uint32_t i = 0; i < world.entity_count; i++) {
+            if (world.selection.selected[i] && world.is_alive(i)) {
+                sel++;
+                switch (world.units.type[i]) {
+                    case UnitType::Infantry: sel_inf++; break;
+                    case UnitType::Cavalry: sel_cav++; break;
+                    case UnitType::Archer: sel_arc++; break;
+                    default: break;
+                }
+            }
+        }
+        hud.selected_count = sel;
+        hud.selected_infantry = sel_inf;
+        hud.selected_cavalry = sel_cav;
+        hud.selected_archer = sel_arc;
+        hud.red_alive = combat->faction_alive[0];
+        hud.blue_alive = combat->faction_alive[1];
+        hud.total_units = (int)world.entity_count;
+        hud.screen_w = g_screen_w;
+        hud.screen_h = g_screen_h;
+
+        // Render
+        glViewport(0, 0, g_screen_w, g_screen_h);
+        float aspect = (float)g_screen_w / (float)g_screen_h;
+        glm::mat4 view = g_camera.get_view();
+        glm::mat4 proj = g_camera.get_projection(aspect);
+        renderer.render(world, view, proj, g_camera.get_position());
+
+        // Selection box
+        if (g_selecting) {
+            double mx, my;
+            glfwGetCursorPos(window, &mx, &my);
+            glm::vec2 s0 = {g_select_start.x / g_screen_w * 2 - 1, 1 - g_select_start.y / g_screen_h * 2};
+            glm::vec2 s1 = {(float)mx / g_screen_w * 2 - 1, 1 - (float)my / g_screen_h * 2};
+            renderer.render_selection_box(glm::min(s0, s1), glm::max(s0, s1));
+        }
+
+        // HUD
+        hud.render();
+
+        // Minimap dots (reuse static buffer to avoid per-frame alloc)
+        static std::vector<char> alive_flags;
+        alive_flags.resize(world.entity_count);
+        for (uint32_t i = 0; i < world.entity_count; i++) alive_flags[i] = world.is_visible(i) ? 1 : 0;
+        hud.render_minimap_dots(world.transforms.position, world.renders.color,
+                                alive_flags.data(), world.entity_count, 1200.0f);
+
+        glfwSwapBuffers(window);
+    }
+
+    hud.cleanup();
+    renderer.cleanup();
+    delete combat;
+    delete world_ptr;
+    glfwDestroyWindow(window);
+    glfwTerminate();
+    return 0;
+}

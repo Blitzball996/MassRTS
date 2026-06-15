@@ -1,0 +1,44 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="G:\CMakePJ\MassRTS\build\_deps\glm-subbuild\CMakeFiles\fd243a777c6756255867f768c7c70049\glm-populate-mkdir.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="G:\CMakePJ\MassRTS\build\_deps\glm-subbuild\CMakeFiles\fd243a777c6756255867f768c7c70049\glm-populate-download.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="G:\CMakePJ\MassRTS\build\_deps\glm-subbuild\CMakeFiles\fd243a777c6756255867f768c7c70049\glm-populate-update.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="G:\CMakePJ\MassRTS\build\_deps\glm-subbuild\CMakeFiles\fd243a777c6756255867f768c7c70049\glm-populate-patch.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="G:\CMakePJ\MassRTS\build\_deps\glm-subbuild\CMakeFiles\fd243a777c6756255867f768c7c70049\glm-populate-configure.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="G:\CMakePJ\MassRTS\build\_deps\glm-subbuild\CMakeFiles\fd243a777c6756255867f768c7c70049\glm-populate-build.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="G:\CMakePJ\MassRTS\build\_deps\glm-subbuild\CMakeFiles\fd243a777c6756255867f768c7c70049\glm-populate-install.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="G:\CMakePJ\MassRTS\build\_deps\glm-subbuild\CMakeFiles\fd243a777c6756255867f768c7c70049\glm-populate-test.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="G:\CMakePJ\MassRTS\build\_deps\glm-subbuild\CMakeFiles\10d0d4cef02cdc38e6471770aa081f2d\glm-populate-complete.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="G:\CMakePJ\MassRTS\build\_deps\glm-subbuild\CMakeFiles\ba68dd4668dd862f46aa4afd9e3ea2da\glm-populate.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="G:\CMakePJ\MassRTS\build\_deps\glm-subbuild\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="G:\CMakePJ\MassRTS\build\_deps\glm-subbuild\CMakeFiles\glm-populate" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{02F9EF68-CCD0-3680-A75F-471B1999B9ED}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

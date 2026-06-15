@@ -1,0 +1,15 @@
+G:\CMakePJ\MassRTS\build\_deps\glfw-src\src\context.c;G:\CMakePJ\MassRTS\build\_deps\glfw-build\src\glfw.dir\Release\context.obj
+G:\CMakePJ\MassRTS\build\_deps\glfw-src\src\init.c;G:\CMakePJ\MassRTS\build\_deps\glfw-build\src\glfw.dir\Release\init.obj
+G:\CMakePJ\MassRTS\build\_deps\glfw-src\src\input.c;G:\CMakePJ\MassRTS\build\_deps\glfw-build\src\glfw.dir\Release\input.obj
+G:\CMakePJ\MassRTS\build\_deps\glfw-src\src\monitor.c;G:\CMakePJ\MassRTS\build\_deps\glfw-build\src\glfw.dir\Release\monitor.obj
+G:\CMakePJ\MassRTS\build\_deps\glfw-src\src\vulkan.c;G:\CMakePJ\MassRTS\build\_deps\glfw-build\src\glfw.dir\Release\vulkan.obj
+G:\CMakePJ\MassRTS\build\_deps\glfw-src\src\window.c;G:\CMakePJ\MassRTS\build\_deps\glfw-build\src\glfw.dir\Release\window.obj
+G:\CMakePJ\MassRTS\build\_deps\glfw-src\src\win32_init.c;G:\CMakePJ\MassRTS\build\_deps\glfw-build\src\glfw.dir\Release\win32_init.obj
+G:\CMakePJ\MassRTS\build\_deps\glfw-src\src\win32_joystick.c;G:\CMakePJ\MassRTS\build\_deps\glfw-build\src\glfw.dir\Release\win32_joystick.obj
+G:\CMakePJ\MassRTS\build\_deps\glfw-src\src\win32_monitor.c;G:\CMakePJ\MassRTS\build\_deps\glfw-build\src\glfw.dir\Release\win32_monitor.obj
+G:\CMakePJ\MassRTS\build\_deps\glfw-src\src\win32_time.c;G:\CMakePJ\MassRTS\build\_deps\glfw-build\src\glfw.dir\Release\win32_time.obj
+G:\CMakePJ\MassRTS\build\_deps\glfw-src\src\win32_thread.c;G:\CMakePJ\MassRTS\build\_deps\glfw-build\src\glfw.dir\Release\win32_thread.obj
+G:\CMakePJ\MassRTS\build\_deps\glfw-src\src\win32_window.c;G:\CMakePJ\MassRTS\build\_deps\glfw-build\src\glfw.dir\Release\win32_window.obj
+G:\CMakePJ\MassRTS\build\_deps\glfw-src\src\wgl_context.c;G:\CMakePJ\MassRTS\build\_deps\glfw-build\src\glfw.dir\Release\wgl_context.obj
+G:\CMakePJ\MassRTS\build\_deps\glfw-src\src\egl_context.c;G:\CMakePJ\MassRTS\build\_deps\glfw-build\src\glfw.dir\Release\egl_context.obj
+G:\CMakePJ\MassRTS\build\_deps\glfw-src\src\osmesa_context.c;G:\CMakePJ\MassRTS\build\_deps\glfw-build\src\glfw.dir\Release\osmesa_context.obj

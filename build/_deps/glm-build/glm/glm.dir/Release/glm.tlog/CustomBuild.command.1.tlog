@@ -1,0 +1,10 @@
+^G:\CMAKEPJ\MASSRTS\BUILD\_DEPS\GLM-SRC\GLM\CMAKELISTS.TXT
+setlocal
+G:\Cmake\bin\cmake.exe -SG:/CMakePJ/MassRTS -BG:/CMakePJ/MassRTS/build --check-stamp-file G:/CMakePJ/MassRTS/build/_deps/glm-build/glm/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

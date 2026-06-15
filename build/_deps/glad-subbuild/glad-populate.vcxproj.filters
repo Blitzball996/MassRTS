@@ -1,0 +1,44 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="G:\CMakePJ\MassRTS\build\_deps\glad-subbuild\CMakeFiles\669390f3222d8bb5dfc9e77e9974981d\glad-populate-mkdir.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="G:\CMakePJ\MassRTS\build\_deps\glad-subbuild\CMakeFiles\669390f3222d8bb5dfc9e77e9974981d\glad-populate-download.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="G:\CMakePJ\MassRTS\build\_deps\glad-subbuild\CMakeFiles\669390f3222d8bb5dfc9e77e9974981d\glad-populate-update.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="G:\CMakePJ\MassRTS\build\_deps\glad-subbuild\CMakeFiles\669390f3222d8bb5dfc9e77e9974981d\glad-populate-patch.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="G:\CMakePJ\MassRTS\build\_deps\glad-subbuild\CMakeFiles\669390f3222d8bb5dfc9e77e9974981d\glad-populate-configure.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="G:\CMakePJ\MassRTS\build\_deps\glad-subbuild\CMakeFiles\669390f3222d8bb5dfc9e77e9974981d\glad-populate-build.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="G:\CMakePJ\MassRTS\build\_deps\glad-subbuild\CMakeFiles\669390f3222d8bb5dfc9e77e9974981d\glad-populate-install.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="G:\CMakePJ\MassRTS\build\_deps\glad-subbuild\CMakeFiles\669390f3222d8bb5dfc9e77e9974981d\glad-populate-test.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="G:\CMakePJ\MassRTS\build\_deps\glad-subbuild\CMakeFiles\4d7717ca98ba93085e8579117e093869\glad-populate-complete.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="G:\CMakePJ\MassRTS\build\_deps\glad-subbuild\CMakeFiles\7bb739f45d4d1c9ec3866986e5e2da48\glad-populate.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="G:\CMakePJ\MassRTS\build\_deps\glad-subbuild\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="G:\CMakePJ\MassRTS\build\_deps\glad-subbuild\CMakeFiles\glad-populate" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{197120C0-6EFE-32A0-ABA7-B53CAE9774B1}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

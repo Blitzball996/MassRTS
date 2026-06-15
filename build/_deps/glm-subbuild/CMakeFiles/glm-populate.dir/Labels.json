@@ -1,0 +1,46 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "G:/CMakePJ/MassRTS/build/_deps/glm-subbuild/CMakeFiles/glm-populate"
+		},
+		{
+			"file" : "G:/CMakePJ/MassRTS/build/_deps/glm-subbuild/CMakeFiles/ba68dd4668dd862f46aa4afd9e3ea2da/glm-populate.rule"
+		},
+		{
+			"file" : "G:/CMakePJ/MassRTS/build/_deps/glm-subbuild/CMakeFiles/10d0d4cef02cdc38e6471770aa081f2d/glm-populate-complete.rule"
+		},
+		{
+			"file" : "G:/CMakePJ/MassRTS/build/_deps/glm-subbuild/CMakeFiles/fd243a777c6756255867f768c7c70049/glm-populate-build.rule"
+		},
+		{
+			"file" : "G:/CMakePJ/MassRTS/build/_deps/glm-subbuild/CMakeFiles/fd243a777c6756255867f768c7c70049/glm-populate-configure.rule"
+		},
+		{
+			"file" : "G:/CMakePJ/MassRTS/build/_deps/glm-subbuild/CMakeFiles/fd243a777c6756255867f768c7c70049/glm-populate-download.rule"
+		},
+		{
+			"file" : "G:/CMakePJ/MassRTS/build/_deps/glm-subbuild/CMakeFiles/fd243a777c6756255867f768c7c70049/glm-populate-install.rule"
+		},
+		{
+			"file" : "G:/CMakePJ/MassRTS/build/_deps/glm-subbuild/CMakeFiles/fd243a777c6756255867f768c7c70049/glm-populate-mkdir.rule"
+		},
+		{
+			"file" : "G:/CMakePJ/MassRTS/build/_deps/glm-subbuild/CMakeFiles/fd243a777c6756255867f768c7c70049/glm-populate-patch.rule"
+		},
+		{
+			"file" : "G:/CMakePJ/MassRTS/build/_deps/glm-subbuild/CMakeFiles/fd243a777c6756255867f768c7c70049/glm-populate-test.rule"
+		},
+		{
+			"file" : "G:/CMakePJ/MassRTS/build/_deps/glm-subbuild/CMakeFiles/fd243a777c6756255867f768c7c70049/glm-populate-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"glm-populate"
+		],
+		"name" : "glm-populate"
+	}
+}

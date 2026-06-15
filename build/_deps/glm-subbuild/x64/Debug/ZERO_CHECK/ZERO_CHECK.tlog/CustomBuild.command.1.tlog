@@ -1,0 +1,10 @@
+^G:\CMAKEPJ\MASSRTS\BUILD\_DEPS\GLM-SUBBUILD\CMAKEFILES\BA68DD4668DD862F46AA4AFD9E3EA2DA\GENERATE.STAMP.RULE
+setlocal
+G:\Cmake\bin\cmake.exe -SG:/CMakePJ/MassRTS/build/_deps/glm-subbuild -BG:/CMakePJ/MassRTS/build/_deps/glm-subbuild --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file G:/CMakePJ/MassRTS/build/_deps/glm-subbuild/glm-populate.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

@@ -1,0 +1,10 @@
+^G:\CMAKEPJ\MASSRTS\BUILD\_DEPS\GLFW-SUBBUILD\CMAKEFILES\3E09D23888A7A1DC4FE59FEEBD4C0E72\GENERATE.STAMP.RULE
+setlocal
+G:\Cmake\bin\cmake.exe -SG:/CMakePJ/MassRTS/build/_deps/glfw-subbuild -BG:/CMakePJ/MassRTS/build/_deps/glfw-subbuild --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file G:/CMakePJ/MassRTS/build/_deps/glfw-subbuild/glfw-populate.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

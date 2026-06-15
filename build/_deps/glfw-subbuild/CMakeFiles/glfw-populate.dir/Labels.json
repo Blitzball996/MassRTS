@@ -1,0 +1,46 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "G:/CMakePJ/MassRTS/build/_deps/glfw-subbuild/CMakeFiles/glfw-populate"
+		},
+		{
+			"file" : "G:/CMakePJ/MassRTS/build/_deps/glfw-subbuild/CMakeFiles/3e09d23888a7a1dc4fe59feebd4c0e72/glfw-populate.rule"
+		},
+		{
+			"file" : "G:/CMakePJ/MassRTS/build/_deps/glfw-subbuild/CMakeFiles/acd2bd1f2b5abda2bf70a605677fd0ce/glfw-populate-complete.rule"
+		},
+		{
+			"file" : "G:/CMakePJ/MassRTS/build/_deps/glfw-subbuild/CMakeFiles/e103f4e979f5432f3462503fd22fe6fa/glfw-populate-build.rule"
+		},
+		{
+			"file" : "G:/CMakePJ/MassRTS/build/_deps/glfw-subbuild/CMakeFiles/e103f4e979f5432f3462503fd22fe6fa/glfw-populate-configure.rule"
+		},
+		{
+			"file" : "G:/CMakePJ/MassRTS/build/_deps/glfw-subbuild/CMakeFiles/e103f4e979f5432f3462503fd22fe6fa/glfw-populate-download.rule"
+		},
+		{
+			"file" : "G:/CMakePJ/MassRTS/build/_deps/glfw-subbuild/CMakeFiles/e103f4e979f5432f3462503fd22fe6fa/glfw-populate-install.rule"
+		},
+		{
+			"file" : "G:/CMakePJ/MassRTS/build/_deps/glfw-subbuild/CMakeFiles/e103f4e979f5432f3462503fd22fe6fa/glfw-populate-mkdir.rule"
+		},
+		{
+			"file" : "G:/CMakePJ/MassRTS/build/_deps/glfw-subbuild/CMakeFiles/e103f4e979f5432f3462503fd22fe6fa/glfw-populate-patch.rule"
+		},
+		{
+			"file" : "G:/CMakePJ/MassRTS/build/_deps/glfw-subbuild/CMakeFiles/e103f4e979f5432f3462503fd22fe6fa/glfw-populate-test.rule"
+		},
+		{
+			"file" : "G:/CMakePJ/MassRTS/build/_deps/glfw-subbuild/CMakeFiles/e103f4e979f5432f3462503fd22fe6fa/glfw-populate-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"glfw-populate"
+		],
+		"name" : "glfw-populate"
+	}
+}

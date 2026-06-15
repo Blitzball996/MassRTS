@@ -10,6 +10,9 @@ public:
     glm::vec2 faction_center[2] = {};
     int faction_alive[2] = {0, 0};
     ProjectileSystem* proj_sys = nullptr;
+    // Terrain height lookup so projectiles spawn/aim at correct elevation
+    // (without this, y=0 made cannonballs spawn underground and never fly).
+    float (*height_fn)(float,float) = nullptr;
 
     void rebuild_grid(World& world) {
         static int grid_frame = 0;
@@ -140,7 +143,9 @@ public:
         if (proj_sys) {
             glm::vec2 from2d = world.transforms.position[i];
             glm::vec2 to2d = world.transforms.position[t];
-            proj_sys->spawn_arrow(glm::vec3(from2d.x,0,from2d.y), glm::vec3(to2d.x,0,to2d.y), world.units.faction[i]);
+            float fy = height_fn ? height_fn(from2d.x,from2d.y) : 0.0f;
+            float ty = height_fn ? height_fn(to2d.x,to2d.y) : 0.0f;
+            proj_sys->spawn_arrow(glm::vec3(from2d.x,fy+4.0f,from2d.y), glm::vec3(to2d.x,ty+2.0f,to2d.y), world.units.faction[i]);
         }
         world.units.attack_cooldown[i] = 1.5f;
     }
@@ -227,7 +232,9 @@ public:
             cooldown = 4.0f; // SLOW fire rate - makes it impactful
             if (proj_sys) {
                 glm::vec2 f2d=world.transforms.position[i], t2d=world.transforms.position[t];
-                proj_sys->spawn_cannonball(glm::vec3(f2d.x,0,f2d.y), glm::vec3(t2d.x,0,t2d.y), world.units.faction[i]);
+                float fy = height_fn ? height_fn(f2d.x,f2d.y) : 0.0f;
+                float ty = height_fn ? height_fn(t2d.x,t2d.y) : 0.0f;
+                proj_sys->spawn_cannonball(glm::vec3(f2d.x,fy+5.0f,f2d.y), glm::vec3(t2d.x,ty+1.0f,t2d.y), world.units.faction[i]);
             }
         } else if (type == UnitType::Samurai) {
             cooldown = 0.5f;

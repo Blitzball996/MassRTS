@@ -393,6 +393,7 @@ int main(int argc, char* argv[]) {
 
     CombatSystem* combat = new CombatSystem();
     combat->proj_sys = &renderer.projectiles;
+    combat->height_fn = &s_terrain_height;
     MovementSystem movement;
     movement.terrain_ptr = &renderer.terrain;
     UI hud;
@@ -591,40 +592,8 @@ int main(int argc, char* argv[]) {
             { double _t=glfwGetTime(); renderer.gpu_compute.readback_combat(world); tm_readback += glfwGetTime()-_t; }
 
             // === CHANGE 1: spawn VISUAL projectiles for ranged fire (BOTH factions) ===
-            // GPU combat applies ranged damage directly and never spawns arrows/cannonballs.
-            // Detect a FIRE EVENT via attack_cooldown rising edge and spawn a visual arc.
-            {
-                static std::vector<float> prev_cd;
-                if (prev_cd.size() < world.entity_count) prev_cd.resize(world.entity_count, 0.0f);
-                int spawned = 0;
-                const int MAX_SPAWN_PER_FRAME = 400;
-                for (uint32_t i = 0; i < world.entity_count; i++) {
-                    float cd = world.units.attack_cooldown[i];
-                    float pcd = prev_cd[i];
-                    prev_cd[i] = cd; // always update
-                    if (!world.is_alive(i)) continue;
-                    UnitType ut = world.units.type[i];
-                    if (ut != UnitType::Archer && ut != UnitType::Artillery) continue;
-                    if (world.units.state[i] != UnitState::Attacking) continue;
-                    Entity t = world.units.target[i];
-                    if (t == INVALID_ENTITY || t >= world.entity_count || !world.is_alive(t)) continue;
-                    // Rising edge: cooldown jumped up from ~0 (just fired this frame)
-                    if (!(pcd <= 0.05f && cd > pcd + 0.1f)) continue;
-                    if (spawned >= MAX_SPAWN_PER_FRAME) continue;
-                    glm::vec2 fp = world.transforms.position[i];
-                    glm::vec2 tp = world.transforms.position[t];
-                    float fy = renderer.terrain.get_height_at(fp.x, fp.y);
-                    float ty = renderer.terrain.get_height_at(tp.x, tp.y);
-                    glm::vec3 from(fp.x, fy + 4.0f, fp.y);
-                    glm::vec3 to(tp.x, ty + 2.0f, tp.y);
-                    Faction fac = world.units.faction[i];
-                    if (ut == UnitType::Archer)
-                        renderer.projectiles.spawn_arrow(from, to, fac);
-                    else
-                        renderer.projectiles.spawn_cannonball(from, to, fac);
-                    spawned++;
-                }
-            }
+            // (Projectiles are now spawned inside CombatSystem::perform_attack at the
+            //  correct terrain height; the old rising-edge detector was removed.)
 
             // CPU executes attacks (damage, projectiles, effects, death)
             for (uint32_t i = 0; i < world.entity_count; i++) {

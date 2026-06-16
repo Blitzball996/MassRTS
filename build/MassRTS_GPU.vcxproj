@@ -373,6 +373,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="G:\CMakePJ\MassRTS\src\main_gpu.cpp" />
+    <ClCompile Include="G:\CMakePJ\MassRTS\src\render\sdf_terrain_tables.cpp" />
   </ItemGroup>
   <ItemGroup />
   <ItemGroup>

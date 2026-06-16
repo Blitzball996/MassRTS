@@ -2,7 +2,7 @@
 in vec3 v_normal;
 in vec3 v_world_pos;
 in vec2 v_uv;
-flat in float v_biome;
+in float v_biome;
 in float v_height_norm;
 out vec4 frag_color;
 
@@ -94,9 +94,10 @@ void main() {
         // Cracks/strata
         float strata = noise(vec2(v_world_pos.y * 0.3, wpos.x * 0.01));
         base = mix(base, base * 0.7, strata * slope * 2.0);
-        // Snow
-        float snow_line = 0.6 + noise(wpos * 0.005) * 0.1;
-        float snow = smoothstep(snow_line, snow_line + 0.1, v_height_norm) * smoothstep(0.3, 0.0, slope);
+        // Snow 鈥?keyed off true world height (v_height_norm now carries depth,
+        // not height, so use world Y directly to restore mountain snow caps).
+        float snow_h = 46.0 + noise(wpos * 0.005) * 8.0;
+        float snow = smoothstep(snow_h, snow_h + 10.0, v_world_pos.y) * smoothstep(0.3, 0.0, slope);
         base = mix(base, vec3(0.92, 0.94, 0.97), snow);
         // Moss on north faces
         float moss = smoothstep(-0.3, -0.6, n.z) * (1.0-slope) * 0.4;
@@ -169,6 +170,38 @@ void main() {
         float wet = smoothstep(4.0, 2.0, v_world_pos.y);
         base = mix(base, base * 0.6, wet);
     }
+    else if (biome == 7) {
+        // === EXPOSED DIRT (carved subsurface, shallow) ===
+        // Earthy gray-brown, transitions toward neutral gray with depth.
+        vec3 dirt_a = vec3(0.34, 0.29, 0.24);
+        vec3 dirt_b = vec3(0.26, 0.23, 0.20);
+        float clods = warped_fbm(wpos * 0.05 + v_world_pos.y * 0.1);
+        base = mix(dirt_a, dirt_b, clods);
+        float peb = noise(wpos * 0.6 + vec2(v_world_pos.y));
+        base = mix(base, vec3(0.20, 0.18, 0.16), smoothstep(0.6, 0.8, peb) * 0.4);
+        // Deeper soil darkens toward gray (v_height_norm carries depth).
+        float ddirt = clamp(v_height_norm / 16.0, 0.0, 1.0);
+        base = mix(base, vec3(0.22,0.21,0.20), ddirt*0.5);
+        base *= mix(0.95, 0.7, ddirt) * (0.92 + 0.08 * micro);
+    }
+    else if (biome == 8) {
+        // === EXPOSED ROCK (carved subsurface, deep) ===
+        // Neutral gray bedrock, darkening to near-charcoal with depth.
+        vec3 rock_a = vec3(0.42, 0.42, 0.43);
+        vec3 rock_b = vec3(0.30, 0.30, 0.31);
+        vec3 rock_c = vec3(0.50, 0.50, 0.51);
+        float rough = warped_fbm(wpos * 0.04);
+        base = mix(rock_a, rock_b, rough);
+        // horizontal sedimentary strata banding (gray light/dark)
+        float band = sin(v_world_pos.y * 0.55 + noise(wpos * 0.05) * 2.5) * 0.5 + 0.5;
+        base = mix(base, rock_c, smoothstep(0.55, 0.85, band) * 0.4);
+        // subtle lighter mineral streaks (still gray)
+        float vein = smoothstep(0.8, 0.92, noise(wpos * 0.3 + v_world_pos.y * 0.2));
+        base = mix(base, vec3(0.58,0.58,0.60), vein * 0.25);
+        // deep bedrock progressively darker toward charcoal gray
+        float drock = clamp((v_height_norm - 16.0) / 60.0, 0.0, 1.0);
+        base = mix(base, vec3(0.16,0.16,0.17), drock*0.7);
+    }
     else {
         // === GRASS (default) ===
         vec3 grass_lush = vec3(0.18, 0.38, 0.08);
@@ -230,8 +263,11 @@ void main() {
     vec3 fog_color = mix(ground_haze, horizon, clamp(v_world_pos.y / 60.0, 0.0, 1.0));
     color = mix(color, fog_color, clamp(fog_amount, 0.0, 0.65));
 
-    // Height-based color shift (higher = cooler tones)
-    color = mix(color, color * vec3(0.9, 0.95, 1.05), v_height_norm * 0.2);
+    // Height-based cool shift only for terrain ABOVE sea level; subsurface
+    // (carved) areas must stay neutral gray, never bluish.
+    float above = clamp(v_world_pos.y / 80.0, 0.0, 1.0);
+    color = mix(color, color * vec3(0.92, 0.96, 1.04), above * 0.15);
 
     frag_color = vec4(color, 1.0);
 }
+     

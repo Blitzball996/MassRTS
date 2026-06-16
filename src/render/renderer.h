@@ -6,6 +6,7 @@
 #include "../ecs/world.h"
 #include "mesh_gen.h"
 #include "terrain.h"
+#include "sdf_terrain.h"
 #include "decor.h"
 #include "base_system.h"
 #include "model_library.h"
@@ -78,6 +79,8 @@ public:
     glm::vec3 camera_pos_world = {0,0,0};
 
     Terrain terrain;
+    SDFTerrain sdf_terrain; // destructible overlay (real 3D craters/caves)
+    bool heightmap_gpu_dirty = false;
     BattlefieldDecor decor;
     BaseSystem bases;
     ModelLibrary models;
@@ -86,6 +89,7 @@ public:
     GPUCompute gpu_compute;
 
     GLuint select_vao = 0, select_vbo_q = 0;
+    GLuint brush_shader = 0, brush_vao = 0, brush_vbo = 0;
     std::string base_path;
 
     void set_base_path(const std::string& exe) {
@@ -104,6 +108,7 @@ public:
         billboard_shader = load_shader(sd+"billboard.vert", sd+"billboard.frag");
         skinned_shader = load_shader(sd+"skinned.vert", sd+"skinned.frag");
         projectile_shader = load_shader(sd+"projectile.vert", sd+"projectile.frag");
+        brush_shader = load_shader(sd+"brush.vert", sd+"brush.frag");
         sky_shader = load_shader(sd+"sky.vert", sd+"sky.frag");
         glGenVertexArrays(1, &sky_vao); // empty VAO; sky is a gl_VertexID triangle
         if (!unit_shader || !terrain_shader) return false;
@@ -211,11 +216,12 @@ public:
         glBindVertexArray(0);
 
         terrain.generate();
-        decor.generate(3000.0f, [this](float x, float z){ return terrain.get_height_at(x, z); });
+        decor.generate(6000.0f, [this](float x, float z){ return terrain.get_height_at(x, z); });
         bases.init({-550, 0}, {550, 0}, [this](float x, float z){ return terrain.get_height_at(x, z); });
         particles.init();
         projectiles.init();
         gpu_compute.init(sd, terrain);
+        sdf_terrain.init(&terrain, 6000.0f);
 
         if (select_shader) {
             float sq[] = {-1,-1, 1,-1, -1,1, 1,1};
@@ -225,6 +231,19 @@ public:
             glBindBuffer(GL_ARRAY_BUFFER, select_vbo_q);
             glBufferData(GL_ARRAY_BUFFER, sizeof(sq), sq, GL_STATIC_DRAW);
             glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+            glEnableVertexAttribArray(0);
+            glBindVertexArray(0);
+        }
+
+        if (brush_shader) {
+            // Dynamic ring: 65 world-space verts re-uploaded each frame so the
+            // cursor can hug the terrain surface (3 floats per vertex).
+            glGenVertexArrays(1, &brush_vao);
+            glBindVertexArray(brush_vao);
+            glGenBuffers(1, &brush_vbo);
+            glBindBuffer(GL_ARRAY_BUFFER, brush_vbo);
+            glBufferData(GL_ARRAY_BUFFER, 65*3*sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
             glEnableVertexAttribArray(0);
             glBindVertexArray(0);
         }
@@ -267,7 +286,7 @@ public:
         // Balance quality vs cost: real 3D meshes up close, cheap imposters in
         // the far field. The spherical billboard now reads as a proper humanoid,
         // so the switch can come in fairly close to keep the mesh count low.
-        lod_distance = glm::clamp(cam_pos.y * 0.7f, 350.0f, 1100.0f);
+        lod_distance = glm::clamp(cam_pos.y * 0.7f, 900.0f, 2600.0f);
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glEnable(GL_DEPTH_TEST);
@@ -303,7 +322,10 @@ public:
         glUniformMatrix4fv(glGetUniformLocation(terrain_shader,"u_proj"),1,GL_FALSE,&proj[0][0]);
         glUniform1f(glGetUniformLocation(terrain_shader,"u_time"), game_time);
         glUniform3f(glGetUniformLocation(terrain_shader,"u_cam_pos"), cam_pos.x, cam_pos.y, cam_pos.z);
-        terrain.render();
+        // Plan B: the SDF (Marching Cubes) IS the terrain now. The legacy
+        // heightmap mesh is no longer drawn (data kept only so units, camera
+        // and combat keep querying get_height_at). Single surface, no z-fight.
+        sdf_terrain.render();
 
         // Decorations
         glUseProgram(unit_shader);
@@ -343,7 +365,87 @@ public:
         glEnable(GL_DEPTH_TEST);
     }
 
+    // Draws a world-space ring that HUGS the terrain surface (each segment is
+    // lifted to the local ground height) so it reads as paint on the slope, not
+    // a flat floating hoop. Colored by brush type to match the HUD swatch.
+    void render_brush_ring(const glm::mat4& view, const glm::mat4& proj,
+                           glm::vec2 center, float radius, glm::vec3 color) {
+        if (!brush_shader) return;
+        // Build the ring as a CAMERA-FACING billboard so it stays round no
+        // matter what the surface under it looks like (a flat world-XZ circle
+        // would squash to an ellipse on vertical cave walls). Right/up come
+        // from the view matrix rotation rows.
+        glm::vec3 right(view[0][0], view[1][0], view[2][0]);
+        glm::vec3 up   (view[0][1], view[1][1], view[2][1]);
+        glm::vec3 c(center.x, terrain.get_height_at(center.x, center.y) + 0.6f, center.y);
+        float verts[65*3];
+        for (int i = 0; i <= 64; ++i) {
+            float a = (float)i / 64.0f * 6.2831853f;
+            glm::vec3 p = c + (right * cosf(a) + up * sinf(a)) * radius;
+            verts[i*3+0] = p.x; verts[i*3+1] = p.y; verts[i*3+2] = p.z;
+        }
+        glBindBuffer(GL_ARRAY_BUFFER, brush_vbo);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(verts), verts);
+        glDisable(GL_DEPTH_TEST);
+        glLineWidth(2.5f);
+        glUseProgram(brush_shader);
+        glUniformMatrix4fv(glGetUniformLocation(brush_shader,"u_view"),1,GL_FALSE,&view[0][0]);
+        glUniformMatrix4fv(glGetUniformLocation(brush_shader,"u_proj"),1,GL_FALSE,&proj[0][0]);
+        glUniform3f(glGetUniformLocation(brush_shader,"u_color"), color.r, color.g, color.b);
+        glBindVertexArray(brush_vao);
+        glDrawArrays(GL_LINE_STRIP, 0, 65);
+        glBindVertexArray(0);
+        glEnable(GL_DEPTH_TEST);
+    }
+
     float get_terrain_height(float x, float z) const { return terrain.get_height_at(x, z); }
+
+    // Apply a deterministic terrain carve (dig/fill). Updates the SDF volume,
+    // re-meshes affected chunks, and writes back to the heightmap so units and
+    // the camera follow the new surface. Re-uploads the heightmap to GPU sim.
+    void carve_terrain(glm::vec3 center, float radius, bool dig) {
+        SDFTerrain::CarveEvent ev;
+        ev.center = center; ev.radius = radius;
+        ev.op = dig ? SDFTerrain::CarveOp::Dig : SDFTerrain::CarveOp::Fill;
+        sdf_terrain.carve(ev);
+        sdf_terrain.remesh_dirty();
+        heightmap_gpu_dirty = true; // batch the full-map re-upload to once/frame
+    }
+
+    // Carve a continuous tunnel between two world points by stamping overlapping
+    // dig spheres along the segment (a capsule). Used for progressive tunneling
+    // while the player drags the cave brush, so a swipe bores one clean shaft
+    // instead of disconnected pits.
+    void carve_tunnel(glm::vec3 a, glm::vec3 b, float radius) {
+        float len = glm::length(b - a);
+        // Step ~0.5r so consecutive spheres overlap and leave no gap.
+        int steps = std::max(1, (int)(len / (radius * 0.5f)));
+        for (int i = 0; i <= steps; ++i) {
+            glm::vec3 p = a + (b - a) * ((float)i / (float)steps);
+            SDFTerrain::CarveEvent ev;
+            ev.center = p; ev.radius = radius;
+            ev.op = SDFTerrain::CarveOp::Dig;
+            sdf_terrain.carve(ev);
+        }
+        sdf_terrain.remesh_dirty();
+        heightmap_gpu_dirty = true;
+    }
+
+    // Smooth the SDF inside a sphere (rounds off sharp dug edges / spikes).
+    void smooth_terrain(glm::vec3 center, float radius) {
+        sdf_terrain.smooth(center, radius);
+        sdf_terrain.remesh_dirty();
+        heightmap_gpu_dirty = true;
+    }
+
+    // Call once per frame after all carves: re-upload heightmap to GPU sim only
+    // if something actually deformed the terrain this frame.
+    void flush_terrain_gpu() {
+        if (heightmap_gpu_dirty && gpu_compute.supported) {
+            gpu_compute.upload_heightmap(terrain);
+            heightmap_gpu_dirty = false;
+        }
+    }
 
     void gpu_upload_units(const World& world) {
         if (gpu_compute.supported) gpu_compute.upload_units(world);
@@ -361,7 +463,7 @@ public:
             MeshGenerator::destroy_mesh(meshes[i]);
             glDeleteBuffers(1, &inst_vbo[i]);
         }
-        terrain.cleanup(); decor.cleanup(); particles.cleanup(); projectiles.cleanup();
+        terrain.cleanup(); sdf_terrain.cleanup(); decor.cleanup(); particles.cleanup(); projectiles.cleanup();
         gpu_compute.cleanup();
         glDeleteBuffers(1, &bb_inst_vbo); glDeleteBuffers(1, &bb_quad_vbo);
         glDeleteVertexArrays(1, &bb_vao);
@@ -457,7 +559,7 @@ private:
 
         // Dispatch GPU instance generation compute shader
         gpu_compute.dispatch_instances(world.entity_count, cam_pos,
-            lod_distance, 3000.0f, frustum.planes, game_time);
+            lod_distance, 6000.0f, frustum.planes, game_time);
 
         // Read back instance counts for draw
         uint32_t counts[4];
@@ -653,3 +755,12 @@ private:
         glDeleteShader(v); glDeleteShader(f); return p;
     }
 };
+// (end of renderer.h)                                                          
+              glAttachShader(p,f); glLinkProgram(p);
+        int ok; glGetProgramiv(p,GL_LINK_STATUS,&ok);
+        if(!ok){char log[512]; glGetProgramInfoLog(p,512,0,log); std::cerr<<"Link: "<<log<<"\n"; return 0;}
+        glDeleteShader(v); glDeleteShader(f); return p;
+    }
+};
+// (end of renderer.h)                                                          
+              

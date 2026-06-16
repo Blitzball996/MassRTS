@@ -26,6 +26,7 @@ public:
     bool sculpt_mode = false;
     int  sculpt_brush = 1;   // 0=Raise 1=Dig 2=Smooth 3=Flatten
     int  sculpt_radius = 60;
+    float sculpt_strength = 0.35f; // 0.1..1.0 brush push strength
 
     bool init(int w, int h) {
         screen_w = w; screen_h = h;
@@ -190,9 +191,9 @@ void main() { frag = u_color; }
         if (sculpt_mode) {
             float bx = (float)screen_w * 0.5f - 150;
             float by = (float)screen_h - 60;
-            draw_rect(bx, by, 300, 46, {0.05f, 0.03f, 0.10f, 0.9f});
-            draw_rect(bx, by, 300, 2, {0.6f, 0.4f, 1.0f, 0.9f});
-            // brush color swatch: Raise=green, Dig=red, Smooth=cyan, Flatten=yellow
+            draw_rect(bx, by - 22, 300, 68, {0.05f, 0.03f, 0.10f, 0.9f});
+            draw_rect(bx, by - 22, 300, 2, {0.6f, 0.4f, 1.0f, 0.9f});
+            // brush swatch: 1 Raise-soil=green, 2 Dig-bowl=red, 3 Smooth=cyan, 4 Cave=yellow
             glm::vec4 bc =
                 sculpt_brush==0 ? glm::vec4(0.3f,1.0f,0.3f,1.0f) :
                 sculpt_brush==1 ? glm::vec4(1.0f,0.3f,0.2f,1.0f) :
@@ -214,6 +215,14 @@ void main() { frag = u_color; }
             draw_rect(bx + 258, by + 12, 22, 22, {0.15f,0.30f,0.18f,0.9f}); // [+]
             draw_rect(bx + 263, by + 22, 12, 3, {0.8f,1.0f,0.85f,1.0f});
             draw_rect(bx + 268, by + 17, 3, 13, {0.8f,1.0f,0.85f,1.0f});
+            // Strength bar (scroll wheel in sculpt mode). Track + filled portion
+            // + numeric readout (0..100). Sits in the row added above the panel.
+            float sby = by - 16;
+            draw_rect(bx + 10, sby, 200, 10, {0.18f,0.16f,0.24f,0.9f});       // track
+            float sfill = 200.0f * ((sculpt_strength - 0.1f) / 0.9f);
+            draw_rect(bx + 10, sby, sfill, 10, {0.55f,0.85f,1.0f,1.0f});       // fill
+            draw_number(bx + 224, sby - 2, (int)(sculpt_strength * 100.0f),
+                        {0.7f,0.9f,1.0f,1.0f}, 1.0f);
         }
 
         glBindVertexArray(0);

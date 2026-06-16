@@ -31,6 +31,21 @@
 #include "ui/menu.h"
 #define MINIAUDIO_IMPLEMENTATION
 #include "audio/audio_system.h"
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
+// Capture the current framebuffer to a PNG (flips rows; GL origin is bottom-left).
+static void save_screenshot(const char* path, int w, int h) {
+    std::vector<unsigned char> px((size_t)w*h*3);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadBuffer(GL_BACK);
+    glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+    std::vector<unsigned char> flip((size_t)w*h*3);
+    for (int y = 0; y < h; ++y)
+        std::memcpy(&flip[(size_t)(h-1-y)*w*3], &px[(size_t)y*w*3], (size_t)w*3);
+    stbi_write_png(path, w, h, 3, flip.data(), w*3);
+    std::cout << "[screenshot] " << path << "\n";
+}
 
 Camera g_camera;
 bool g_selecting = false;
@@ -56,6 +71,9 @@ bool g_sculpt_mode = false;        // toggle with B
 bool g_victory_enabled = false;    // OFF: endless battle, no win/lose screen
 int  g_sculpt_brush = 1;           // 0=Raise 1=Dig 2=Smooth 3=Flatten
 float g_sculpt_radius = 60.0f;     // world units
+float g_sculpt_strength = 0.15f;   // brush strength 0.05..1.0, gentle default; , / . to tune
+glm::vec3 g_tunnel_last(0.0f);      // last cave-brush carve point (for tunneling)
+bool g_tunnel_active = false;       // mid-drag tunnel in progress
 bool g_mouse_held = false;         // left button currently down
 const int SCULPT_COST_PER_VERT = 1; // money charged per modified vertex-tick
 
@@ -66,7 +84,12 @@ void fatal_error(const char* msg) {
 #endif
 }
 
-void scroll_callback(GLFWwindow* w, double x, double y) { g_camera.on_scroll(y); }
+void scroll_callback(GLFWwindow* w, double x, double y) {
+    // The wheel ALWAYS controls camera zoom (sculpt mode included). Brush
+    // strength is tuned with [ and ] keys, so the player never loses camera
+    // control while editing terrain.
+    g_camera.on_scroll(y);
+}
 
 static float s_terrain_height(float x, float z) {
     return g_renderer ? g_renderer->terrain.get_height_at(x, z) : 0.0f;
@@ -145,6 +168,7 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
             g_select_start = {(float)mx, (float)my};
         } else if (action == GLFW_RELEASE) {
             g_mouse_held = false;
+            g_tunnel_active = false; // end the current tunnel run
             if (!g_selecting) return;
             g_selecting = false;
             glm::vec2 end_screen = {(float)mx, (float)my};
@@ -258,6 +282,9 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
         if (key == GLFW_KEY_4) { g_sculpt_brush = 3; return; } // Flatten
         if (key == GLFW_KEY_LEFT_BRACKET)  g_sculpt_radius = std::max(15.0f, g_sculpt_radius - 15.0f);
         if (key == GLFW_KEY_RIGHT_BRACKET) g_sculpt_radius = std::min(250.0f, g_sculpt_radius + 15.0f);
+        // Brush strength on , / .  (wheel stays on camera zoom)
+        if (key == GLFW_KEY_COMMA)  g_sculpt_strength = std::max(0.05f, g_sculpt_strength - 0.05f);
+        if (key == GLFW_KEY_PERIOD) g_sculpt_strength = std::min(1.0f,  g_sculpt_strength + 0.05f);
     }
 
     // Number keys 1-9: buy unit from shop (disabled while sculpting)
@@ -361,8 +388,17 @@ void spawn_army(World& world, Faction faction, glm::vec2 center, int count,
     }
 }
 
+// Auto-screenshot mode: when run with --shots, the game warms up, then orbits
+// the camera through preset angles, saves a PNG per angle, and exits. Lets the
+// terrain be inspected from multiple viewpoints without manual piloting.
+static bool g_shot_mode = false;
+static int  g_shot_warmup = 90; // frames to let terrain mesh/settle first
+
 int main(int argc, char* argv[]) {
     std::string exe_path = argv[0];
+    for (int ai = 1; ai < argc; ++ai) {
+        if (std::string(argv[ai]) == "--shots") g_shot_mode = true;
+    }
     if (!glfwInit()) { fatal_error("GLFW failed"); return -1; }
 
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -414,8 +450,8 @@ int main(int argc, char* argv[]) {
     audio.init();
 
     std::cout << "Deploying armies...\n";
-    spawn_army(world, Faction::Red, {-550, 0}, 90000, {0.25f, 0.3f, 0.2f}, true);
-    spawn_army(world, Faction::Blue, {550, 0}, 90000, {0.50f, 0.35f, 0.15f}, false);
+    spawn_army(world, Faction::Red, {-550, 0}, 35000, {0.25f, 0.3f, 0.2f}, true);
+    spawn_army(world, Faction::Blue, {550, 0}, 35000, {0.50f, 0.35f, 0.15f}, false);
     g_game_state.init_capture_points(g_game_state.selected_map);
     g_game_state.phase = GamePhase::Playing;
     std::cout << "Deployed " << world.entity_count << " units\n";
@@ -445,7 +481,9 @@ int main(int argc, char* argv[]) {
         renderer.terrain.apply_preset(g_game_state.selected_map);
         renderer.terrain.generate_with_seed(MAP_PRESETS[g_game_state.selected_map].seed);
         renderer.gpu_compute.upload_heightmap(renderer.terrain);
-        renderer.decor.generate(3000.0f, [&](float x, float z){ return renderer.terrain.get_height_at(x, z); });
+        renderer.sdf_terrain.cleanup();
+        renderer.sdf_terrain.init(&renderer.terrain, 6000.0f);
+        renderer.decor.generate(6000.0f, [&](float x, float z){ return renderer.terrain.get_height_at(x, z); });
         for (uint32_t i = 0; i < world.entity_count; i++) world.kill_entity(i);
         world.entity_count = 0;
         world.free_list.clear();
@@ -515,11 +553,44 @@ int main(int argc, char* argv[]) {
             double cmx, cmy; glfwGetCursorPos(window, &cmx, &cmy);
             Ray sray = g_camera.screen_to_ray((float)cmx, (float)cmy, g_screen_w, g_screen_h);
             glm::vec2 gp = g_camera.ray_to_ground(sray);
-            float strength = 1.4f; // height units per frame at brush center
-            Terrain::Brush b = (Terrain::Brush)g_sculpt_brush;
-            int changed = renderer.terrain.sculpt(gp.x, gp.y, g_sculpt_radius, strength, b);
-            int cost = (b == Terrain::Brush::Smooth || b == Terrain::Brush::Flatten)
-                       ? changed / 4 : changed;
+            // Plan B: every brush drives the SDF (the heightmap is no longer
+            // drawn). 0=Raise soil, 1=Dig bowl, 2=Smooth, 3=Cave (deep dig).
+            float gy = renderer.terrain.get_height_at(gp.x, gp.y);
+            float cr = g_sculpt_radius * 0.55f;
+            // Strength scales how far each stamp pushes (depth/height of the
+            // sphere offset), so a low strength paints gentle, shallow changes.
+            float str = g_sculpt_strength;
+            int changed = (int)(cr * cr * 0.05f * str);
+            switch (g_sculpt_brush) {
+                case 0: // Raise soil: add material as a dome sitting on the surface
+                    renderer.carve_terrain(glm::vec3(gp.x, gy + cr * 0.45f * str, gp.y), cr, false);
+                    break;
+                case 1: // Dig: shallow rounded bowl
+                    renderer.carve_terrain(glm::vec3(gp.x, gy - cr * 0.35f * str, gp.y), cr, true);
+                    break;
+                case 2: // Smooth: gentle fill that rounds off sharp features
+                    renderer.smooth_terrain(glm::vec3(gp.x, gy, gp.y), cr);
+                    changed /= 4;
+                    break;
+                case 3: { // Cave/Tunnel: a TBM that keeps boring along the look
+                          // direction, going deeper every frame while LMB held.
+                    float tr = cr * 0.85f;
+                    if (!g_tunnel_active) {
+                        // Start the bore at the surface point under the cursor.
+                        g_tunnel_last = glm::vec3(gp.x, gy, gp.y);
+                        g_tunnel_active = true;
+                    }
+                    // Advance the cutting head along the cursor ray; strength
+                    // controls bore speed so a low strength digs slowly.
+                    float step = cr * (0.5f + str * 1.6f);
+                    glm::vec3 tip = g_tunnel_last + sray.direction * step;
+                    renderer.carve_tunnel(g_tunnel_last, tip, tr);
+                    g_tunnel_last = tip;
+                    changed = (int)(tr * tr * 0.08f);
+                    break;
+                }
+            }
+            int cost = changed;
             world.money[0] = std::max(0, world.money[0] - cost);
         }
 
@@ -684,6 +755,20 @@ int main(int argc, char* argv[]) {
             movement.update(world, dt, combat->grid);
         }
 
+        // === Terrain destruction: drain explosion-queued craters ===
+        // Cap per frame so a big barrage cannot stall the frame on remeshing.
+        if (!world.carve_requests.empty()) {
+            const int MAX_CARVES_PER_FRAME = 8;
+            int n = (int)world.carve_requests.size();
+            int start = (n > MAX_CARVES_PER_FRAME) ? n - MAX_CARVES_PER_FRAME : 0;
+            for (int ci = start; ci < n; ci++) {
+                const auto& cr = world.carve_requests[ci];
+                renderer.carve_terrain(cr.center, cr.radius, cr.dig);
+            }
+            world.carve_requests.clear();
+        }
+        renderer.flush_terrain_gpu(); // one batched GPU heightmap re-upload
+
         // === Territory Control ===
         if (g_game_state.phase == GamePhase::Playing) {
             static std::vector<uint8_t> territory_alive;
@@ -727,14 +812,9 @@ int main(int argc, char* argv[]) {
                                                          : (is_nuke ? 260.0f : 90.0f);
                 world.apply_explosion(hit.position, hit.radius, force,
                                       hit.damage, hit.source_faction);
-                // Carve a crater into the terrain at the impact point so blasts
-                // leave a lasting mark. Cannon = small dent, nuke = deep crater.
-                {
-                    float crater_r = hit.radius * 0.6f;
-                    float crater_depth = is_nuke ? 16.0f : 3.0f;
-                    renderer.terrain.sculpt(hit.position.x, hit.position.z,
-                                            crater_r, crater_depth, Terrain::Brush::Dig);
-                }
+                // Crater carving is handled by apply_explosion -> carve_requests
+                // (real 3D SDF crater), drained earlier this frame. No heightmap
+                // sculpt here (heightmap is no longer rendered under Plan B).
             }
         }
 
@@ -787,6 +867,7 @@ int main(int argc, char* argv[]) {
         hud.sculpt_mode = g_sculpt_mode;
         hud.sculpt_brush = g_sculpt_brush;
         hud.sculpt_radius = (int)g_sculpt_radius;
+        hud.sculpt_strength = g_sculpt_strength;
 
         } // end sim_active
         // === Render ===
@@ -813,6 +894,21 @@ int main(int argc, char* argv[]) {
             glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             renderer.render_selection_box(glm::min(s0,s1), glm::max(s0,s1));
             glDisable(GL_BLEND);
+            glDisable(GL_BLEND);
+        }
+
+        // Sculpt brush cursor: a ground ring under the mouse showing footprint.
+        if (g_sculpt_mode && draw_world && g_game_state.phase == GamePhase::Playing) {
+            double bmx, bmy; glfwGetCursorPos(window, &bmx, &bmy);
+            Ray bray = g_camera.screen_to_ray((float)bmx, (float)bmy, g_screen_w, g_screen_h);
+            glm::vec2 bgp = g_camera.ray_to_ground(bray);
+            glm::vec3 bcol =
+                g_sculpt_brush==0 ? glm::vec3(0.3f,1.0f,0.3f) :
+                g_sculpt_brush==1 ? glm::vec3(1.0f,0.3f,0.2f) :
+                g_sculpt_brush==2 ? glm::vec3(0.3f,0.8f,1.0f) :
+                                    glm::vec3(1.0f,0.7f,0.2f);
+            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            renderer.render_brush_ring(view, proj, bgp, g_sculpt_radius * 0.55f, bcol);
             glDisable(GL_BLEND);
         }
 
@@ -899,6 +995,41 @@ int main(int argc, char* argv[]) {
 
         glDisable(GL_BLEND);
         glEnable(GL_DEPTH_TEST);
+
+        // --- Auto-screenshot orbit ---
+        if (g_shot_mode) {
+            static int sframe = 0;
+            static int shot_idx = 0;
+            // angle presets: {yaw, pitch, distance, target_x, target_z}
+            struct Shot { float yaw, pitch, dist, tx, tz; const char* name; };
+            static const Shot shots[] = {
+                {  0.0f, 35.0f, 1400.0f,    0,    0, "shot_0_front_far" },
+                { 45.0f, 55.0f,  900.0f,    0,    0, "shot_1_high_45"   },
+                { 90.0f, 12.0f,  700.0f, -800,    0, "shot_2_low_sidemtn" },
+                {135.0f, 25.0f, 1000.0f,    0,  800, "shot_3_edge_mtn"  },
+                {200.0f,  8.0f,  600.0f,  600,  600, "shot_4_grazing"   },
+                { 30.0f, 80.0f, 1600.0f,    0,    0, "shot_5_topdown"   },
+            };
+            const int NSHOTS = (int)(sizeof(shots)/sizeof(shots[0]));
+            sframe++;
+            if (sframe > g_shot_warmup) {
+                int local = (sframe - g_shot_warmup) % 12;
+                if (local == 0 && shot_idx < NSHOTS) {
+                    const Shot& s = shots[shot_idx];
+                    g_camera.yaw = glm::radians(s.yaw);
+                    g_camera.pitch = glm::radians(s.pitch);
+                    g_camera.distance = s.dist;
+                    g_camera.target = glm::vec3(s.tx, 0, s.tz);
+                } else if (local == 8 && shot_idx < NSHOTS) {
+                    char path[256];
+                    std::snprintf(path, sizeof(path), "%s.png", shots[shot_idx].name);
+                    save_screenshot(path, g_screen_w, g_screen_h);
+                    shot_idx++;
+                    if (shot_idx >= NSHOTS) { glfwSwapBuffers(window); break; }
+                }
+            }
+        }
+
         glfwSwapBuffers(window);
     }
 
@@ -911,4 +1042,4 @@ int main(int argc, char* argv[]) {
     glfwTerminate();
     return 0;
 }
-    
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           

@@ -35,6 +35,11 @@ public:
     // Radiation zones
     struct RadZone { glm::vec2 center; float radius; float life; Faction owner; };
     std::vector<RadZone> rad_zones;
+    // Terrain carve requests queued by explosions; drained each frame by the
+    // render layer (which owns the SDF terrain) and, in multiplayer, broadcast
+    // as deterministic TerrainCarve events so every client carves identically.
+    struct CarveRequest { glm::vec3 center; float radius; bool dig; };
+    std::vector<CarveRequest> carve_requests;
 
     World() {
         alive.resize(MAX_ENTITIES, false);
@@ -113,6 +118,9 @@ public:
     // Apply explosion: 3D ragdoll
     void apply_explosion(glm::vec3 center, float radius, float force, float damage, Faction source) {
         glm::vec2 c2d(center.x, center.z);
+        // Queue a real 3D crater proportional to blast radius (capped so tiny
+        // hits do not thrash the SDF). Only sizeable blasts deform terrain.
+        if (radius >= 12.0f) carve_requests.push_back({center, radius * 0.7f, true});
         for (uint32_t i = 0; i < entity_count; i++) {
             if (!alive[i]) continue;
             if (units.state[i] == UnitState::Dead) continue;

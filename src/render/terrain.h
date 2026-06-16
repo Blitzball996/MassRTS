@@ -10,7 +10,7 @@ enum class TerrainBiome : uint8_t { Grass=0, Mountain=1, Swamp=2, Forest=3, Tren
 class Terrain {
 public:
     static constexpr int GRID_SIZE = 512;
-    static constexpr float WORLD_SIZE = 3000.0f;
+    static constexpr float WORLD_SIZE = 6000.0f;
     static constexpr float MAX_HEIGHT = 80.0f;
     static constexpr float CELL_SIZE = WORLD_SIZE / (GRID_SIZE - 1);
 
@@ -96,8 +96,10 @@ public:
             for (int x = 0; x < GRID_SIZE; x++)
                 heights(z,x) *= height_scale;
 
-        // Smoothing pass (3x) - eliminates jagged edges
-        for (int pass = 0; pass < 3; pass++) {
+        // Smoothing pass (5x) - eliminates jagged edges. Extra passes tame the
+        // steepest ridged-noise peaks so the 3-unit-voxel Marching Cubes mesh
+        // stops shattering into spikes on near-vertical cliffs.
+        for (int pass = 0; pass < 5; pass++) {
             for (int z = 1; z < GRID_SIZE-1; z++) {
                 for (int x = 1; x < GRID_SIZE-1; x++) {
                     if (biomes(z,x) == TerrainBiome::River) continue;

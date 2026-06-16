@@ -4,6 +4,9 @@
     <ClCompile Include="G:\CMakePJ\MassRTS\src\main_gpu.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="G:\CMakePJ\MassRTS\src\render\sdf_terrain_tables.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <CustomBuild Include="G:\CMakePJ\MassRTS\CMakeLists.txt" />

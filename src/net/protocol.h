@@ -24,6 +24,7 @@ enum class PacketType : uint8_t {
     PlayerJoined = 14,
     PlayerLeft = 15,
     TickSync = 16,    // Lockstep tick confirmation
+    TerrainCarve = 17, // Deterministic SDF terrain carve event
 };
 
 #pragma pack(push, 1)
@@ -65,4 +66,12 @@ struct TickSyncPacket {
     uint32_t confirmed_tick;
     uint8_t player_count;
 };
+// Deterministic terrain carve (SDF dig/fill). Replayed identically on all clients.
+struct TerrainCarvePacket {
+    PacketHeader header;
+    float cx, cy, cz;
+    float radius;
+    uint8_t op;
+};
+
 #pragma pack(pop)

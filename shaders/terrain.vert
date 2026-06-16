@@ -12,7 +12,7 @@ uniform float u_time;
 out vec3 v_normal;
 out vec3 v_world_pos;
 out vec2 v_uv;
-flat out float v_biome; // no interpolation: avoids biome rainbow-stripe edges
+out float v_biome;
 out float v_height_norm;
 
 // Sum of directional Gerstner waves. Returns vertical offset and writes the
@@ -61,3 +61,4 @@ void main() {
     v_height_norm = a_height_norm;
     gl_Position = u_proj * u_view * vec4(pos, 1.0);
 }
+                                                            

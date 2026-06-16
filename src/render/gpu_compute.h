@@ -41,6 +41,7 @@ public:
     GLuint ssbo_indirect = 0;    // binding 2: indirect draw commands
     GLuint ssbo_counters = 0;    // binding 3: atomic counters
     GLuint heightmap_tex = 0;    // terrain heightmap as texture
+    const Terrain* terrain_ptr = nullptr; // for per-unit slope speed (uphill slow)
 
     // Combat + Movement GPU pipeline
     GLuint combat_shader = 0;
@@ -76,6 +77,7 @@ public:
     bool supported = false;
 
     bool init(const std::string& shader_dir, const Terrain& terrain) {
+        terrain_ptr = &terrain;
         // Clear any pending GL errors
         while (glGetError() != GL_NO_ERROR) {}
         // Check GL 4.3+ compute support
@@ -404,7 +406,18 @@ public:
             d[i].state = world.alive[i] ? (uint32_t)world.units.state[i] : 3u;
             d[i].target = world.units.target[i];
             d[i].cd = world.units.attack_cooldown[i];
-            d[i].max_hp = world.units.max_health[i]; d[i].p2 = 0.7f;
+            // Per-unit terrain speed: biome base * slope factor (uphill slow,
+            // downhill fast). Direction comes from current velocity; idle units
+            // (no heading) fall back to biome-only via a zero move dir.
+            float tmult = 0.7f;
+            if (terrain_ptr) {
+                glm::vec2 v = world.transforms.velocity[i];
+                glm::vec2 mdir(0.0f);
+                float vl = std::sqrt(v.x*v.x + v.y*v.y);
+                if (vl > 1e-4f) mdir = v / vl;
+                tmult = terrain_ptr->get_speed_mult(d[i].pos.x, d[i].pos.y, mdir);
+            }
+            d[i].max_hp = world.units.max_health[i]; d[i].p2 = tmult;
         }
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo_units);
         glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, world.entity_count * sizeof(UC), d.data());

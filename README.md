@@ -1,5 +1,7 @@
 # MassRTS
 
+> 🌐 **Language / 语言**：**English** · [简体中文](README.zh-CN.md)
+
 A large-scale real-time strategy (RTS) and mass-battle simulator built on a
 custom OpenGL engine. The goal is to push **tens of thousands to hundreds of
 thousands of units** on screen at once, with a fully **destructible volumetric

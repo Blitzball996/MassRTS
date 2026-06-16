@@ -226,7 +226,12 @@ public:
             cooldown = 1.2f;
             if (proj_sys) {
                 glm::vec2 f2d=world.transforms.position[i], t2d=world.transforms.position[t];
-                proj_sys->spawn_arrow(glm::vec3(f2d.x,0,f2d.y), glm::vec3(t2d.x,0,t2d.y), world.units.faction[i]);
+                // Sample terrain so arrows launch from the archer's real
+                // elevation and aim at the target's ground height (without this
+                // they spawn at y=0, i.e. underground on raised terrain).
+                float fy = height_fn ? height_fn(f2d.x,f2d.y) : 0.0f;
+                float ty = height_fn ? height_fn(t2d.x,t2d.y) : 0.0f;
+                proj_sys->spawn_arrow(glm::vec3(f2d.x,fy+4.0f,f2d.y), glm::vec3(t2d.x,ty+2.0f,t2d.y), world.units.faction[i]);
             }
         } else if (type == UnitType::Artillery) {
             cooldown = 4.0f; // SLOW fire rate - makes it impactful
@@ -268,7 +273,8 @@ public:
             cooldown = 1.5f;
             // Self-destruct: massive damage in radius
             glm::vec2 pos = world.transforms.position[i];
-            glm::vec3 center(pos.x, 0, pos.y);
+            float py = height_fn ? height_fn(pos.x, pos.y) : 0.0f;
+            glm::vec3 center(pos.x, py, pos.y);
             world.apply_explosion(center, 20.0f, 40.0f, 80.0f, world.units.faction[i]);
             world.units.health[i] = 0;
             world.kill_entity(i);

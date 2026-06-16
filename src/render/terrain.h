@@ -278,8 +278,13 @@ private:
         if (height > MAX_HEIGHT * 0.6f && slope > 0.15f) return TerrainBiome::Mountain;
         if (height > MAX_HEIGHT * 0.7f) return TerrainBiome::Mountain;
 
-        // Swamp in low flat areas
-        if (height < 8.0f && slope < 0.1f) return TerrainBiome::Swamp;
+        // Swamp in low flat areas. Jitter the thresholds with noise so the
+        // swamp boundary is organic rather than a hard grid-aligned step (the
+        // hard cutoff produced the jagged "folds" at the swamp edge).
+        float sjit = (fbm(nx*0.06f+7.0f, nz*0.06f+11.0f, 4) - 0.5f);
+        float h_thr = 8.0f + sjit * 4.0f;
+        float s_thr = 0.10f + sjit * 0.05f;
+        if (height < h_thr && slope < s_thr) return TerrainBiome::Swamp;
 
         // Forest patches (noise-driven)
         float fnoise = fbm(nx*0.003f+20.0f, nz*0.003f+30.0f, 3);
@@ -294,20 +299,41 @@ private:
     }
 
     void carve_river(std::mt19937& rng) {
+        // Meandering river: sum several octaves of sine at different
+        // frequencies/phases (a cheap 1-D fbm) so the centreline wanders
+        // organically instead of tracing one lazy sine. Width also breathes
+        // along the course, giving wide bends and narrow runs.
         float river_z = std::uniform_real_distribution<float>(-150, 150)(rng);
-        float freq = std::uniform_real_distribution<float>(0.002f, 0.004f)(rng);
-        float amp = std::uniform_real_distribution<float>(80, 180)(rng);
+        float ph0 = std::uniform_real_distribution<float>(0, 6.28f)(rng);
+        float ph1 = std::uniform_real_distribution<float>(0, 6.28f)(rng);
+        float ph2 = std::uniform_real_distribution<float>(0, 6.28f)(rng);
+        float ph3 = std::uniform_real_distribution<float>(0, 6.28f)(rng);
+        float amp = std::uniform_real_distribution<float>(90, 170)(rng);
 
         for (int x = 0; x < GRID_SIZE; x++) {
             float wx = ((float)x/(GRID_SIZE-1)-0.5f)*WORLD_SIZE;
-            float river_center_z = river_z + sin(wx*freq)*amp + sin(wx*freq*2.3f+1.5f)*amp*0.3f;
-            float river_width = 18.0f + sin(wx*0.008f)*5.0f;
+            // fbm-style meander: large slow bends + medium kinks + small wiggle.
+            float meander =
+                  sin(wx*0.0018f + ph0) * amp
+                + sin(wx*0.0041f + ph1) * amp*0.45f
+                + sin(wx*0.0093f + ph2) * amp*0.22f
+                + sin(wx*0.0200f + ph3) * amp*0.10f;
+            float river_center_z = river_z + meander;
+            // Width varies (wide meander pools vs narrow rapids).
+            float river_width = 20.0f
+                + sin(wx*0.006f + ph2)*8.0f
+                + sin(wx*0.017f + ph1)*4.0f;
 
             for (int z = 0; z < GRID_SIZE; z++) {
                 float wz = ((float)z/(GRID_SIZE-1)-0.5f)*WORLD_SIZE;
-                float dist_to_river = fabs(wz - river_center_z);
+                // Perturb the bank position with multi-octave noise so the
+                // shoreline wiggles organically instead of snapping to grid
+                // cells (the cause of the staircase "folds" at the water edge).
+                float wobble = (fbm(wx*0.05f, wz*0.05f, 4) - 0.5f) * 14.0f
+                             + (fbm(wx*0.18f, wz*0.18f, 3) - 0.5f) * 5.0f;
+                float dist_to_river = fabs(wz - river_center_z) + wobble;
                 if (dist_to_river < river_width) {
-                    float t = dist_to_river / river_width;
+                    float t = glm::clamp(dist_to_river / river_width, 0.0f, 1.0f);
                     float depth = (cos(t * 3.14159f) * 0.5f + 0.5f) * 1.2f;
                     heights(z,x) = glm::min(heights(z,x), 2.5f - depth);
                     biomes(z,x) = TerrainBiome::River;

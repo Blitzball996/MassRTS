@@ -5,6 +5,7 @@ in vec3 v_world_pos;
 in float v_part_id;
 in vec3 v_local_pos;
 in vec3 v_local_normal;
+in float v_fade;
 
 out vec4 frag_color;
 
@@ -122,5 +123,5 @@ void main() {
     float dist = length(v_world_pos.xz) / 2500.0;
     lit = mix(lit, vec3(0.55, 0.62, 0.68), clamp(dist * dist * 0.3, 0.0, 0.25));
 
-    frag_color = vec4(lit, 1.0);
+    frag_color = vec4(lit, v_fade); // LOD crossfade
 }

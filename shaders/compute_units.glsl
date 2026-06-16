@@ -113,26 +113,39 @@ void main() {
     else if (u.state == 2u) anim_state = 2.0;             // attacking
     if (u.cooldown > 0.8) anim_state += 4.0;              // hit flash
     inst.state = anim_state;
-    inst._pad = 0.0;
 
-    // Determine bucket
-    uint bucket;
-    if (dist < u_lod_dist) {
-        bucket = min(u.type, 2u);
-    } else {
-        bucket = 3u; // billboard
+    // --- LOD crossfade band ---------------------------------------------
+    // Instead of a hard mesh<->billboard switch at u_lod_dist (which pops),
+    // blend across a transition band [lo, hi] around it. Inside the band a
+    // unit is emitted into BOTH buckets, each with a fade weight in inst._pad
+    // (0..1 alpha). The shaders multiply final alpha by this fade.
+    const float BAND = 0.18;                  // +/-18% transition width
+    float lo = u_lod_dist * (1.0 - BAND);
+    float hi = u_lod_dist * (1.0 + BAND);
+
+    // mesh weight: 1 near, ramps to 0 across the band; billboard is the inverse
+    float mesh_w = 1.0 - clamp((dist - lo) / max(hi - lo, 1.0), 0.0, 1.0);
+    float bb_w   = 1.0 - mesh_w;
+
+    uint meshBucket = min(u.type, 2u);
+
+    // Emit MESH instance if it contributes (near side + band).
+    if (mesh_w > 0.001) {
+        inst._pad = mesh_w;
+        uint slot = atomicAdd(counters[meshBucket], 1u);
+        if (slot < 80000u) {
+            instances[meshBucket * 80000u + slot] = inst;
+            draw_cmds[meshBucket].y = min(counters[meshBucket], 80000u);
+        }
     }
 
-    // Atomically allocate a slot
-    uint slot = atomicAdd(counters[bucket], 1u);
-    if (slot >= 80000u) return; // overflow guard (no write past buffer)
-
-    // Write to section of instance buffer
-    uint base_offset = bucket * 80000u;
-    instances[base_offset + slot] = inst;
-
-    // Update indirect draw instanceCount. Clamp to buffer capacity so the
-    // indirect draw never reads past the 80000-slot section even if more
-    // units mapped to this bucket than fit (otherwise GPU faults -> black screen).
-    draw_cmds[bucket].y = min(counters[bucket], 80000u);
+    // Emit BILLBOARD instance if it contributes (far side + band).
+    if (bb_w > 0.001) {
+        inst._pad = bb_w;
+        uint slot = atomicAdd(counters[3], 1u);
+        if (slot < 80000u) {
+            instances[3u * 80000u + slot] = inst;
+            draw_cmds[3].y = min(counters[3], 80000u);
+        }
+    }
 }

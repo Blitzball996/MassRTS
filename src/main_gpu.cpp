@@ -27,6 +27,7 @@
 #include "input/camera.h"
 #include "ui/hud.h"
 #include "game/game_state.h"
+#include "game/settlement_system.h"
 #include "ui/menu.h"
 #define MINIAUDIO_IMPLEMENTATION
 #include "audio/audio_system.h"
@@ -42,6 +43,7 @@ Renderer* g_renderer = nullptr;
 bool g_nuke_targeting = false;
 // Game state machine
 GameState g_game_state;
+SettlementSystem g_settlements; // AI commanders: march -> settle -> build -> produce
 MenuRenderer g_menu;
 bool g_mouse_clicked_this_frame = false;
 
@@ -394,6 +396,12 @@ int main(int argc, char* argv[]) {
     if (!renderer.init(1600, 900)) { fatal_error("Renderer failed"); return -1; }
     g_menu.init(1600, 900);
 
+    // Feed the real terrain height into the camera and particle system so the
+    // view can descend into bomb craters and effects settle on the crater floor
+    // instead of the flat Z=0 plane.
+    g_camera.ground_height = &s_terrain_height;
+    renderer.particles.ground_height = &s_terrain_height;
+
     CombatSystem* combat = new CombatSystem();
     combat->proj_sys = &renderer.projectiles;
     combat->height_fn = &s_terrain_height;
@@ -406,12 +414,13 @@ int main(int argc, char* argv[]) {
     audio.init();
 
     std::cout << "Deploying armies...\n";
-    spawn_army(world, Faction::Red, {-550, 0}, 100000, {0.25f, 0.3f, 0.2f}, true);
-    spawn_army(world, Faction::Blue, {550, 0}, 100000, {0.50f, 0.35f, 0.15f}, false);
+    spawn_army(world, Faction::Red, {-550, 0}, 90000, {0.25f, 0.3f, 0.2f}, true);
+    spawn_army(world, Faction::Blue, {550, 0}, 90000, {0.50f, 0.35f, 0.15f}, false);
     g_game_state.init_capture_points(g_game_state.selected_map);
     g_game_state.phase = GamePhase::Playing;
     std::cout << "Deployed " << world.entity_count << " units\n";
     std::cout << "Controls: 1-9=Buy units, +/-=batch size, N=Nuke(click target), RMB=Move\n";
+    std::cout << "Camera: WASD=Pan, Q/E=Rotate, R/F=Rise/Sink, MMB-drag=Orbit(tilt up to look out of craters), Scroll=Zoom\n";
 
     g_camera.target = {0, 20, 0};
     g_camera.distance = 200.0f;  // Close up, immersive
@@ -442,12 +451,16 @@ int main(int argc, char* argv[]) {
         world.free_list.clear();
         world.live_count = 0;
         renderer.bases.reset({-550, 0}, {550, 0});
-        spawn_army(world, Faction::Red, {-550, 0}, 100000, {0.25f, 0.3f, 0.2f}, true);
-        spawn_army(world, Faction::Blue, {550, 0}, 100000, {0.50f, 0.35f, 0.15f}, false);
+        spawn_army(world, Faction::Red, {-550, 0}, 90000, {0.25f, 0.3f, 0.2f}, true);
+        spawn_army(world, Faction::Blue, {550, 0}, 90000, {0.50f, 0.35f, 0.15f}, false);
         g_game_state.init_capture_points(g_game_state.selected_map);
         g_game_state.match_time = 0;
         g_game_state.victory_timer = 0;
         g_game_state.winning_faction = -1;
+        // AI commanders: each faction marches a vanguard out, plants an HQ,
+        // builds a barracks, and the barracks produces reinforcements.
+        g_settlements.height_fn = &s_terrain_height;
+        g_settlements.init({-550, 0}, {550, 0});
         combat->rebuild_grid(world);
         renderer.gpu_compute.upload_units(world);
         g_game_state.phase = GamePhase::Playing;
@@ -549,6 +562,12 @@ int main(int argc, char* argv[]) {
         // === Combat AI ===
         bool sim_active = (g_game_state.phase == GamePhase::Playing);
         if (sim_active) {
+
+        // === AI Commanders (settlement / production) ===
+        // March -> Settle (plant HQ) -> Develop (build barracks) -> Produce.
+        // Runs before the combat grid rebuild so new structures/units are
+        // included this frame. Player move commands are never overridden.
+        g_settlements.update(world, dt);
 
         // GPU Combat + Movement Pipeline
         if (renderer.gpu_compute.combat_gpu_ready) {
@@ -892,3 +911,4 @@ int main(int argc, char* argv[]) {
     glfwTerminate();
     return 0;
 }
+    

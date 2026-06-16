@@ -2,6 +2,7 @@
 in vec3 v_color;
 in vec2 v_uv;
 in float v_selected;
+in float v_fade;
 out vec4 frag_color;
 
 void main() {
@@ -54,5 +55,5 @@ void main() {
         color = mix(color, vec3(0.2, 0.8, 0.2), 0.3);
     }
 
-    frag_color = vec4(color, 1.0);
+    frag_color = vec4(color, v_fade); // LOD crossfade
 }

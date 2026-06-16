@@ -2,11 +2,12 @@
 in vec3 v_normal;
 in vec3 v_world_pos;
 in vec2 v_uv;
-in float v_biome;
+flat in float v_biome;
 in float v_height_norm;
 out vec4 frag_color;
 
 uniform float u_time;
+uniform vec3 u_cam_pos; // camera world pos (water Fresnel/reflection)
 
 // Noise
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
@@ -41,30 +42,44 @@ void main() {
     vec3 base;
 
     if (biome == 5) {
-        // === RIVER / WATER ===
-        float depth = max(0.0, -v_world_pos.y + 2.0) * 0.15;
-        vec3 shallow = vec3(0.15, 0.42, 0.45);
-        vec3 deep = vec3(0.04, 0.12, 0.18);
-        base = mix(shallow, deep, clamp(depth, 0.0, 1.0));
-        // Caustics/ripple
-        float ripple = noise(wpos * 0.15 + vec2(u_time * 0.4, u_time * 0.3));
-        float ripple2 = noise(wpos * 0.3 - vec2(u_time * 0.2, u_time * 0.5));
-        base += vec3(0.08, 0.12, 0.15) * ripple * ripple2;
-        // Specular highlight
-        vec3 view_dir = normalize(vec3(0.3, 0.9, 0.2));
-        vec3 light = normalize(vec3(0.4, 0.85, 0.3));
-        vec3 half_v = normalize(light + view_dir);
-        float spec = pow(max(dot(n + vec3(0, ripple*0.1, 0), half_v), 0.0), 64.0);
-        base += vec3(0.5, 0.5, 0.4) * spec * 0.6;
-        // Foam at edges
-        float edge_foam = smoothstep(0.0, 0.5, v_world_pos.y + 0.5);
-        base = mix(base + vec3(0.3, 0.3, 0.25) * noise(wpos * 2.0 + u_time), base, edge_foam);
-
-        // Final lighting for water (less shadow)
+        // === RIVER / WATER (Fresnel reflection + animated normal ripples) ===
         vec3 light_dir = normalize(vec3(0.4, 0.85, 0.3));
-        float NdotL = max(dot(n, light_dir), 0.0);
-        base *= (0.6 + NdotL * 0.4);
-        frag_color = vec4(base, 0.88);
+        vec3 view_dir = normalize(u_cam_pos - v_world_pos);
+
+        // Perturb the (Gerstner-shaded) surface normal with two scrolling ripple
+        // layers so the reflection shimmers smoothly instead of faceting.
+        float r1 = noise(wpos * 0.18 + vec2(u_time * 0.45,  u_time * 0.30));
+        float r2 = noise(wpos * 0.40 - vec2(u_time * 0.22,  u_time * 0.55));
+        vec3 ripple_n = vec3((r1 - 0.5) * 0.6, 0.0, (r2 - 0.5) * 0.6);
+        vec3 N = normalize(n + ripple_n);
+
+        float depth = clamp(max(0.0, -v_world_pos.y + 2.0) * 0.15, 0.0, 1.0);
+        vec3 shallow = vec3(0.18, 0.46, 0.50);
+        vec3 deep    = vec3(0.03, 0.10, 0.17);
+        vec3 water_col = mix(shallow, deep, depth);
+
+        // Schlick Fresnel: grazing angles reflect the sky, steep angles show the
+        // water body -> the glassy-at-the-horizon look real water has.
+        float cosi = clamp(dot(N, view_dir), 0.0, 1.0);
+        float F0 = 0.02;
+        float fres = F0 + (1.0 - F0) * pow(1.0 - cosi, 5.0);
+
+        vec3 refl = reflect(-view_dir, N);
+        float up = clamp(refl.y * 0.5 + 0.5, 0.0, 1.0);
+        vec3 sky_col = mix(vec3(0.55, 0.62, 0.70), vec3(0.28, 0.46, 0.78), up);
+
+        vec3 half_v = normalize(light_dir + view_dir);
+        float spec = pow(max(dot(N, half_v), 0.0), 120.0);
+
+        vec3 col = mix(water_col, sky_col, fres);
+        col += vec3(1.0, 0.96, 0.85) * spec * 0.8;
+
+        float edge_foam = 1.0 - smoothstep(0.0, 1.2, v_world_pos.y + 0.6);
+        col = mix(col, vec3(0.85, 0.88, 0.85), edge_foam * 0.5 * (0.6 + 0.4 * r1));
+
+        float NdotL = max(dot(N, light_dir), 0.0);
+        col *= (0.7 + NdotL * 0.3);
+        frag_color = vec4(col, 0.90);
         return;
     }
 
@@ -203,11 +218,17 @@ void main() {
     float ao = smoothstep(-2.0, 8.0, v_world_pos.y) * 0.3 + 0.7;
     color *= ao;
 
-    // Atmospheric fog (exponential)
-    float dist = length(v_world_pos.xz);
-    float fog_amount = 1.0 - exp(-dist * dist * 0.0000003);
-    vec3 fog_color = mix(vec3(0.55, 0.62, 0.72), vec3(0.45, 0.50, 0.58), v_world_pos.y / 60.0);
-    color = mix(color, fog_color, clamp(fog_amount, 0.0, 0.5));
+    // Atmospheric fog (exponential, CAMERA-relative). The old version measured
+    // distance from the world origin, so fog density was independent of where
+    // you actually stood and far terrain met the sky with a hard seam. Using
+    // the true camera distance and tinting toward the sky's horizon colour lets
+    // distant ground dissolve smoothly into the procedural sky.
+    float dist = length(v_world_pos - u_cam_pos);
+    float fog_amount = 1.0 - exp(-dist * 0.00035);
+    vec3 horizon = vec3(0.62, 0.70, 0.80);
+    vec3 ground_haze = vec3(0.50, 0.56, 0.62);
+    vec3 fog_color = mix(ground_haze, horizon, clamp(v_world_pos.y / 60.0, 0.0, 1.0));
+    color = mix(color, fog_color, clamp(fog_amount, 0.0, 0.65));
 
     // Height-based color shift (higher = cooler tones)
     color = mix(color, color * vec3(0.9, 0.95, 1.05), v_height_norm * 0.2);

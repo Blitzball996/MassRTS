@@ -33,6 +33,10 @@ public:
 
     std::mt19937 rng{42};
 
+    // Terrain height sampler so particles settle on the real ground (crater
+    // floors) instead of the flat Z=0 plane. Set from main after renderer init.
+    float (*ground_height)(float, float) = nullptr;
+
     void init() {
         particles.reserve(MAX_PARTICLES);
         gpu_data.reserve(MAX_PARTICLES);
@@ -180,8 +184,9 @@ public:
             if (p.drag > 0) p.velocity *= glm::max(0.0f, 1.0f - p.drag * dt);
             p.position += p.velocity * dt;
             p.size += p.grow * dt;
-            if (p.position.y < 0) {
-                p.position.y = 0;
+            float floor_y = ground_height ? ground_height(p.position.x, p.position.z) : 0.0f;
+            if (p.position.y < floor_y) {
+                p.position.y = floor_y;
                 p.velocity = glm::vec3(0);
             }
         }
@@ -214,3 +219,4 @@ public:
         glDeleteBuffers(1, &vbo_inst);
     }
 };
+         

@@ -8,6 +8,7 @@ layout(location=3) in vec3 a_inst_color;
 layout(location=4) in float a_inst_scale;
 layout(location=5) in float a_inst_rotation;
 layout(location=6) in float a_inst_state;
+layout(location=10) in float a_inst_fade;
 
 uniform mat4 u_view;
 uniform mat4 u_proj;
@@ -20,6 +21,7 @@ out vec3 v_world_pos;
 out float v_part_id;
 out vec3 v_local_pos;
 out vec3 v_local_normal; // pre-rotation normal for face detection
+out float v_fade;
 
 vec3 rotate_x(vec3 p, float angle, float pivot_y) {
     p.y -= pivot_y;
@@ -94,4 +96,5 @@ void main() {
     v_normal = rot_norm;
     v_world_pos = world_pos;
     v_part_id = a_part_pivot.x;
+    v_fade = (a_inst_fade <= 0.0) ? 1.0 : a_inst_fade; // LOD crossfade alpha
 }

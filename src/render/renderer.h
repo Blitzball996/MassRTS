@@ -1,5 +1,6 @@
 #pragma once
 #include <glad/glad.h>
+#include <GLFW/glfw3.h> // glfwGetTime for sky animation (glad must precede)
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include "../ecs/world.h"
@@ -59,6 +60,8 @@ public:
     GLuint unit_shader = 0, terrain_shader = 0, select_shader = 0;
     GLuint particle_shader = 0, billboard_shader = 0, projectile_shader = 0;
     GLuint skinned_shader = 0;
+    GLuint sky_shader = 0; GLuint sky_vao = 0; // procedural atmospheric sky
+    glm::vec3 sun_dir = glm::normalize(glm::vec3(0.4f, 0.85f, 0.3f)); // matches scene light dir
     SkinnedModel skinned_models[NUM_MESH_TYPES]; // optional GPU-skinned override per bucket
 
     Mesh meshes[NUM_MESH_TYPES]; // Infantry,Cavalry,Archer,Bomber,Artillery,Shield,Samurai
@@ -101,6 +104,8 @@ public:
         billboard_shader = load_shader(sd+"billboard.vert", sd+"billboard.frag");
         skinned_shader = load_shader(sd+"skinned.vert", sd+"skinned.frag");
         projectile_shader = load_shader(sd+"projectile.vert", sd+"projectile.frag");
+        sky_shader = load_shader(sd+"sky.vert", sd+"sky.frag");
+        glGenVertexArrays(1, &sky_vao); // empty VAO; sky is a gl_VertexID triangle
         if (!unit_shader || !terrain_shader) return false;
 
         // Create all meshes (index matches UnitType enum)
@@ -201,6 +206,8 @@ public:
         glEnableVertexAttribArray(5); glVertexAttribDivisor(5,1);
         glVertexAttribPointer(6,1,GL_FLOAT,GL_FALSE,s,(void*)offsetof(InstanceData,state));
         glEnableVertexAttribArray(6); glVertexAttribDivisor(6,1);
+        glVertexAttribPointer(10,1,GL_FLOAT,GL_FALSE,s,(void*)offsetof(InstanceData,_pad));
+        glEnableVertexAttribArray(10); glVertexAttribDivisor(10,1);
         glBindVertexArray(0);
 
         terrain.generate();
@@ -257,17 +264,45 @@ public:
 
     void render(const World& world, const glm::mat4& view, const glm::mat4& proj, glm::vec3 cam_pos) {
         camera_pos_world = cam_pos;
-        lod_distance = glm::clamp(cam_pos.y * 0.5f, 200.0f, 800.0f);
+        // Balance quality vs cost: real 3D meshes up close, cheap imposters in
+        // the far field. The spherical billboard now reads as a proper humanoid,
+        // so the switch can come in fairly close to keep the mesh count low.
+        lod_distance = glm::clamp(cam_pos.y * 0.7f, 350.0f, 1100.0f);
 
-        glClearColor(0.45f, 0.55f, 0.6f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glEnable(GL_DEPTH_TEST);
+
+        // === Procedural sky (atmospheric scattering + volumetric clouds) ===
+        // Drawn first as a fullscreen triangle at the far plane; depth test
+        // LEQUAL so terrain/units overwrite it. No depth write so it never
+        // occludes the scene.
+        if (sky_shader) {
+            glDepthMask(GL_FALSE);
+            glDepthFunc(GL_LEQUAL);
+            glUseProgram(sky_shader);
+            glm::mat4 inv_view = glm::inverse(view);
+            glm::mat4 inv_proj = glm::inverse(proj);
+            glUniformMatrix4fv(glGetUniformLocation(sky_shader,"u_inv_view"),1,GL_FALSE,&inv_view[0][0]);
+            glUniformMatrix4fv(glGetUniformLocation(sky_shader,"u_inv_proj"),1,GL_FALSE,&inv_proj[0][0]);
+            glUniform3f(glGetUniformLocation(sky_shader,"u_sun_dir"), sun_dir.x, sun_dir.y, sun_dir.z);
+            glUniform3f(glGetUniformLocation(sky_shader,"u_cam_pos"), cam_pos.x, cam_pos.y, cam_pos.z);
+            glUniform1f(glGetUniformLocation(sky_shader,"u_time"), (float)glfwGetTime());
+            glBindVertexArray(sky_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glBindVertexArray(0);
+            glDepthMask(GL_TRUE);
+            glDepthFunc(GL_LESS);
+        } else {
+            glClearColor(0.45f, 0.55f, 0.6f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+        }
 
         // Terrain
         glUseProgram(terrain_shader);
         glUniformMatrix4fv(glGetUniformLocation(terrain_shader,"u_view"),1,GL_FALSE,&view[0][0]);
         glUniformMatrix4fv(glGetUniformLocation(terrain_shader,"u_proj"),1,GL_FALSE,&proj[0][0]);
         glUniform1f(glGetUniformLocation(terrain_shader,"u_time"), game_time);
+        glUniform3f(glGetUniformLocation(terrain_shader,"u_cam_pos"), cam_pos.x, cam_pos.y, cam_pos.z);
         terrain.render();
 
         // Decorations
@@ -408,6 +443,8 @@ private:
         glEnableVertexAttribArray(8); glVertexAttribDivisor(8,1);
         glVertexAttribPointer(9,1,GL_FLOAT,GL_FALSE,s,(void*)(offset + offsetof(InstanceData,state)));
         glEnableVertexAttribArray(9); glVertexAttribDivisor(9,1);
+        glVertexAttribPointer(10,1,GL_FLOAT,GL_FALSE,s,(void*)(offset + offsetof(InstanceData,_pad)));
+        glEnableVertexAttribArray(10); glVertexAttribDivisor(10,1);
 
         glDrawElementsInstanced(GL_TRIANGLES, sm.index_count, GL_UNSIGNED_INT, 0, (int)clamped);
         glBindVertexArray(0);
@@ -462,6 +499,8 @@ private:
             glEnableVertexAttribArray(5); glVertexAttribDivisor(5,1);
             glVertexAttribPointer(6,1,GL_FLOAT,GL_FALSE,s,(void*)(offset + offsetof(InstanceData,state)));
             glEnableVertexAttribArray(6); glVertexAttribDivisor(6,1);
+            glVertexAttribPointer(10,1,GL_FLOAT,GL_FALSE,s,(void*)(offset + offsetof(InstanceData,_pad)));
+            glEnableVertexAttribArray(10); glVertexAttribDivisor(10,1);
 
             glDrawElementsInstanced(GL_TRIANGLES, meshes[t].index_count, GL_UNSIGNED_INT, 0, (int)clamped);
         }
@@ -489,6 +528,8 @@ private:
             glEnableVertexAttribArray(5); glVertexAttribDivisor(5,1);
             glVertexAttribPointer(6,1,GL_FLOAT,GL_FALSE,s2,(void*)(bb_offset + offsetof(InstanceData,state)));
             glEnableVertexAttribArray(6); glVertexAttribDivisor(6,1);
+            glVertexAttribPointer(10,1,GL_FLOAT,GL_FALSE,s2,(void*)(bb_offset + offsetof(InstanceData,_pad)));
+            glEnableVertexAttribArray(10); glVertexAttribDivisor(10,1);
 
             glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (int)bb_count);
             glBindVertexArray(0);

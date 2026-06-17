@@ -15,8 +15,8 @@
 
 ## 0. 进度总览（每个系统完成并自测后打勾）
 
-- [ ] 阶段 A：基础设施与模式骨架
-- [ ] 阶段 B：最小可玩循环（MVP）
+- [x] 阶段 A：基础设施与模式骨架（独立 SDFCraft.exe + 第一人称 + 区块世界渲染）
+- [~] 阶段 B：最小可玩循环（MVP）（单机挖/放/走已通；多人同步待 N 阶段网络层接入）
 - [ ] 阶段 C：物品 / 背包 / 合成
 - [ ] 阶段 D：实体 / 生物 / AI
 - [ ] 阶段 E：战斗 / 生存数值
@@ -86,17 +86,16 @@ client = 连接服务器，本地预测 + 网络确认
 > 渲染管线、世界对象。不含玩法，但能进入空世界自由飞行。
 
 ### A1. 模式隔离与入口
-- [ ] 新增 `src/sdfcraft/` 目录，所有 SDFCraft 代码隔离在此命名空间 `sdfcraft::`
-- [ ] 新增主菜单选项 "SDF Survival"（`ui/menu.h` 增加菜单项），不影响 RTS 流程
-- [ ] 新增 `GamePhase::SDFCraft` 或独立 `main_sdfcraft.cpp` 入口
-  - 决策：复用现有窗口/GL context，按模式分派 update/render（推荐，省重复初始化）
-- [ ] 启动参数 `--sdfcraft-server <port>`（dedicated）/ `--sdfcraft-host`（listen）/ 菜单（client）
+- [x] 新增 `src/sdfcraft/` 目录，所有 SDFCraft 代码隔离在此命名空间 `sdfcraft::`
+- [~] 新增主菜单选项 "SDF Survival"（暂用独立可执行 `SDFCraft.exe`，菜单接入留待 O 阶段）
+- [x] 独立 `main_sdfcraft.cpp` 入口（独立 GLFW 窗口 + GL 上下文，与 RTS 零耦合）
+- [~] 启动参数：当前支持 `SDFCraft.exe <seed>`；server/host 参数留待 N 阶段
 
 ### A2. 第一人称相机与角色控制器
-- [ ] `sdfcraft::Player` 控制器：WASD 移动、鼠标视角、跳跃、重力、碰撞
-- [ ] 参考 `MovePlayerPacket.cpp` / `PlayerInputPacket.cpp`（MC 输入）
-- [ ] 体素碰撞检测（AABB vs SDF + 方块层），参考 `AABB.cpp` / `Entity.cpp::move`
-- [ ] 飞行/创造模式切换（调试用）
+- [x] `sdfcraft::Player` 控制器：WASD 移动、鼠标视角、跳跃、重力、碰撞（`player.h`）
+- [~] 参考 `MovePlayerPacket` / `PlayerInputPacket`（输入结构已抽象为 `FrameInput`，网络化待 N）
+- [x] 体素碰撞检测（AABB vs 方块层，逐轴 swept + 二分贴合）
+- [x] 飞行/创造模式切换（F 键）
 
 ### A3. 角色模型复用
 - [ ] 从 MinecraftConsoles 提取 Steve/Alex 模型几何 + 皮肤材质
@@ -106,12 +105,13 @@ client = 连接服务器，本地预测 + 网络确认
 - [ ] 第三人称/第一人称手臂渲染
 
 ### A4. 混合体素渲染
-- [ ] 扩展 `SDFTerrain` 加 `BlockLayer`（每 voxel 一个 uint8 方块 id）
-- [ ] 方块网格生成器（贪婪网格 greedy meshing，参考标准体素渲染）
-- [ ] 方块纹理图集（terrain.png 风格，从 MC 提取）
-- [ ] 渲染顺序：SDF marching cubes → 方块立方体 → 透明方块（水/玻璃）
+- [x] 区块方块层（每 voxel 一个 uint8 方块 id，`world.h` `Chunk::blocks`）
+- [x] 方块网格生成器（隐藏面剔除 + 跨区块面剔除，`mesher.h`）
+- [~] 方块纹理图集（当前用调色板顶点色 + 方向明暗；terrain.png 图集留待 O 阶段）
+- [x] 渲染顺序：不透明方块 → 透明方块（水/玻璃/树叶，`chunk_renderer.h`）
 
-**A 阶段自测：** 进入空世界，第一人称飞行/行走，看到地形，无玩法。
+**A 阶段自测：** 2025-xx，`SDFCraft.exe` 编译通过并启动（6s 烟测无崩溃/无 GL 报错），
+进入无尽程序化世界，第一人称行走/飞行，看到地形、树、水、矿物分层。✅
 
 ---
 
@@ -120,15 +120,15 @@ client = 连接服务器，本地预测 + 网络确认
 > 目标：**挖 / 放 / 走 / 多人看见彼此**。这是"最小可玩循环"，做完就能多人联机挖矿建造。
 
 ### B1. 挖掘（破坏方块）
-- [ ] 射线检测选中体素（raycast vs SDF + 方块层），参考 `HitResult.cpp` / `Level::clip`
-- [ ] 挖掘进度（按方块硬度 + 工具），参考 `Tile::getDestroyProgress` / `BlockDestructionProgress.cpp`
-- [ ] 挖掉 → SDF carve(Dig) 或方块层置 AIR → 掉落物品
-- [ ] **网络：** 客户端预测立即挖除 + `VoxelPlayerActionPacket(BREAK)` 发服务器，
-      服务器验证（距离/权限）→ 广播 `VoxelEditBatch`，拒绝则回滚（已有协议骨架）
+- [x] 射线检测选中体素（体素 DDA raycast，`player.h` `Player::raycast`）
+- [~] 挖掘进度（当前为固定冷却 0.18s；按硬度+工具的进度条留待 D/E 阶段）
+- [x] 挖掉 → 方块层置 AIR → 物品进背包（掉落实体留待 C 阶段）
+- [ ] **网络：** 客户端预测 + `VoxelPlayerActionPacket(BREAK)` → 服务器验证广播（待 N 阶段）
 
 ### B2. 放置（建造方块）
-- [ ] 选中面 + 放置方块（方块层 set），参考 `TileItem::useOn` / `Tile::getPlacedTile`
-- [ ] **网络：** 同 B1，`VoxelPlayerActionPacket(PLACE)`，服务器扣背包 + 广播
+- [x] 选中面 + 放置方块（按命中面法线 set 方块，避免压住玩家自身）
+- [x] 放置消耗手持物品（`Inventory::consume_held`）
+- [ ] **网络：** `VoxelPlayerActionPacket(PLACE)`，服务器扣背包 + 广播（待 N 阶段）
 
 ### B3. 玩家移动同步
 - [ ] 4 字节增量移动包（移植 `MoveEntityPacketSmall` 位打包），见 DUAL_MODE_NETWORK 1.3

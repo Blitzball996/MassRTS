@@ -1,0 +1,172 @@
+#pragma once
+// =============================================================================
+// SDFCraft - Mode driver (Phase A skeleton + Phase B core loop)
+// -----------------------------------------------------------------------------
+// Owns one survival/build session: the infinite world, the local player, the
+// inventory and the GL chunk renderer. Streams chunks in/out around the player,
+// processes dig/place against the raycast target, and draws the scene + a
+// selection box. Input is fed in as a neutral struct so the entry point can map
+// GLFW keys without this module depending on the windowing layer.
+//
+// This mode is fully isolated from the RTS: it never touches the ECS world,
+// RtsNetEngine or the SDF terrain. Multiplayer (Phase B4/N) plugs in by routing
+// dig/place through VoxelNetEngine instead of applying locally.
+// =============================================================================
+#include "world.h"
+#include "player.h"
+#include "inventory.h"
+#include "chunk_renderer.h"
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <cmath>
+
+namespace sdfcraft {
+
+struct FrameInput {
+    float move_x = 0.0f;   // strafe [-1,1]
+    float move_z = 0.0f;   // forward [-1,1]
+    bool  jump = false;
+    bool  crouch = false;  // / fly-down
+    float look_dx = 0.0f;  // mouse delta (already scaled by sensitivity)
+    float look_dy = 0.0f;
+    bool  dig = false;       // left click held
+    bool  place = false;     // right click (edge)
+    bool  toggle_fly = false;
+    int   hotbar_set = -1;   // 0..8 to set slot directly, -1 = none
+    int   hotbar_scroll = 0; // wheel
+};
+
+class Mode {
+public:
+    World     world;
+    Player    player;
+    Inventory inv;
+
+    bool init(uint64_t seed, const std::string& shader_dir) {
+        world = World(seed);
+        if (!renderer_.init(shader_dir)) return false;
+        spawn_player();
+        give_starter_items();
+        return true;
+    }
+    void shutdown() { renderer_.shutdown(); }
+
+    void update(const FrameInput& in, float dt, int view_radius = 8) {
+        // --- look ---
+        player.yaw   += in.look_dx;
+        player.pitch -= in.look_dy;
+        if (player.pitch > 89.0f) player.pitch = 89.0f;
+        if (player.pitch < -89.0f) player.pitch = -89.0f;
+
+        if (in.toggle_fly) player.flying = !player.flying;
+        if (in.hotbar_set >= 0) inv.selected = in.hotbar_set;
+        if (in.hotbar_scroll) inv.scroll(in.hotbar_scroll);
+
+        stream_chunks(view_radius);
+
+        // --- physics ---
+        glm::vec3 wish(in.move_x, 0, in.move_z);
+        player.update(world, dt, wish, in.jump, in.crouch);
+
+        // --- targeting ---
+        last_hit_ = player.raycast(world, 6.0f);
+
+        // --- dig (rate-limited) ---
+        dig_cooldown_ -= dt;
+        if (in.dig && last_hit_.hit && dig_cooldown_ <= 0.0f) {
+            do_dig();
+            dig_cooldown_ = 0.18f;
+        }
+        if (!in.dig) dig_cooldown_ = 0.0f;
+
+        // --- place (edge-triggered by caller) ---
+        if (in.place && last_hit_.hit) do_place();
+    }
+
+    void render(int fb_w, int fb_h) {
+        glm::mat4 view = glm::lookAt(player.eye(), player.eye() + player.forward(), glm::vec3(0,1,0));
+        float aspect = fb_h > 0 ? (float)fb_w / (float)fb_h : 1.7778f;
+        glm::mat4 proj = glm::perspective(glm::radians(70.0f), aspect, 0.05f, 1000.0f);
+
+        glm::vec3 sky(0.55f, 0.72f, 0.92f);
+        glClearColor(sky.r, sky.g, sky.b, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        glEnable(GL_CULL_FACE); glCullFace(GL_BACK); glFrontFace(GL_CCW);
+
+        renderer_.sync(world);
+        glm::vec3 sun = glm::normalize(glm::vec3(0.4f, 0.85f, 0.3f));
+        float fog_end = (8 * CHUNK_SX) * 0.95f;
+        renderer_.render(world, view, proj, player.eye(), sun, sky, fog_end * 0.55f, fog_end);
+
+        if (last_hit_.hit)
+            renderer_.render_selection(view, proj, glm::ivec3(last_hit_.bx, last_hit_.by, last_hit_.bz));
+    }
+
+    const RayHit& target() const { return last_hit_; }
+
+private:
+    ChunkRenderer renderer_;
+    RayHit last_hit_;
+    float  dig_cooldown_ = 0.0f;
+
+    void spawn_player() {
+        int h = world.surface_height(0, 0);
+        player.pos = glm::vec3(0.5f, (float)(h + 2), 0.5f);
+    }
+
+    void give_starter_items() {
+        // A creative-ish starter kit so the build loop is usable immediately.
+        inv.add(block_item(BLOCK_PLANK), 64);
+        inv.add(block_item(BLOCK_COBBLE), 64);
+        inv.add(block_item(BLOCK_GLASS), 32);
+        inv.add(block_item(BLOCK_TORCH), 16);
+        inv.add(block_item(BLOCK_LOG), 16);
+    }
+
+    // Load chunks within view_radius, unload well beyond it (hysteresis).
+    void stream_chunks(int view_radius) {
+        ChunkKey center = World::world_to_chunk((int)floorf(player.pos.x), (int)floorf(player.pos.z));
+        for (int dz = -view_radius; dz <= view_radius; dz++)
+        for (int dx = -view_radius; dx <= view_radius; dx++) {
+            if (dx*dx + dz*dz > view_radius*view_radius) continue;
+            world.get_chunk({center.cx + dx, center.cz + dz}, true);
+        }
+        int unload = view_radius + 3;
+        auto& cm = world.chunks();
+        for (auto it = cm.begin(); it != cm.end();) {
+            int dx = it->first.cx - center.cx, dz = it->first.cz - center.cz;
+            if (dx*dx + dz*dz > unload*unload) it = cm.erase(it); // (Phase M: save dirty first)
+            else ++it;
+        }
+    }
+
+    void do_dig() {
+        BlockId b = world.get_block(last_hit_.bx, last_hit_.by, last_hit_.bz);
+        if (b == BLOCK_AIR || b == BLOCK_BEDROCK) return;
+        world.set_block(last_hit_.bx, last_hit_.by, last_hit_.bz, BLOCK_AIR);
+        inv.add(block_item(b), 1); // drop straight into inventory (Phase D: dropped entity)
+    }
+
+    void do_place() {
+        ItemStack& h = inv.held();
+        if (h.empty() || !item_is_block(h.id)) return;
+        int px = last_hit_.bx + last_hit_.nx;
+        int py = last_hit_.by + last_hit_.ny;
+        int pz = last_hit_.bz + last_hit_.nz;
+        if (world.get_block(px, py, pz) != BLOCK_AIR) return;
+        if (overlaps_player(px, py, pz)) return; // don't seal yourself in
+        if (world.set_block(px, py, pz, item_block(h.id)))
+            inv.consume_held();
+    }
+
+    bool overlaps_player(int bx, int by, int bz) {
+        glm::vec3 p = player.pos;
+        float minx = p.x - Player::HALF_W, maxx = p.x + Player::HALF_W;
+        float miny = p.y, maxy = p.y + Player::HEIGHT;
+        float minz = p.z - Player::HALF_W, maxz = p.z + Player::HALF_W;
+        return (bx+1 > minx && bx < maxx) && (by+1 > miny && by < maxy) && (bz+1 > minz && bz < maxz);
+    }
+};
+
+} // namespace sdfcraft

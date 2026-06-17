@@ -50,6 +50,7 @@ list(FILTER CPU_SOURCES EXCLUDE REGEX "src/main\.cpp$")
 list(FILTER CPU_SOURCES EXCLUDE REGEX "src/net/test_.*\.cpp$")
 list(FILTER CPU_SOURCES EXCLUDE REGEX "src/net/rts/example_usage\.cpp$")
 list(FILTER CPU_SOURCES EXCLUDE REGEX "src/net/voxel/.*\.cpp$")
+list(FILTER CPU_SOURCES EXCLUDE REGEX "src/main_sdfcraft\.cpp$")
 
 # GPU target sources (exclude main.cpp, keep main_gpu.cpp)
 set(GPU_SOURCES ${ALL_SOURCES})
@@ -58,6 +59,7 @@ list(FILTER GPU_SOURCES EXCLUDE REGEX "src/main_net\.cpp$")
 list(FILTER GPU_SOURCES EXCLUDE REGEX "src/net/test_.*\.cpp$")
 list(FILTER GPU_SOURCES EXCLUDE REGEX "src/net/rts/example_usage\.cpp$")
 list(FILTER GPU_SOURCES EXCLUDE REGEX "src/net/voxel/.*\.cpp$")
+list(FILTER GPU_SOURCES EXCLUDE REGEX "src/main_sdfcraft\.cpp$")
 
 # === CPU Target (original, stable) ===
 add_executable(${PROJECT_NAME} ${CPU_SOURCES})
@@ -162,3 +164,24 @@ target_link_libraries(test_persistence PRIVATE zlibstatic)
 if(WIN32)
     target_link_libraries(test_persistence PRIVATE ws2_32)
 endif()
+
+# === SDFCraft (survival/build voxel mode, isolated from RTS) ===
+add_executable(SDFCraft src/main_sdfcraft.cpp)
+target_include_directories(SDFCraft PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${glad_SOURCE_DIR}/include
+)
+target_link_libraries(SDFCraft PRIVATE
+    OpenGL::GL
+    glfw
+    glad
+    glm::glm
+)
+if(WIN32)
+    target_link_libraries(SDFCraft PRIVATE ws2_32)
+endif()
+add_custom_command(TARGET SDFCraft POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    ${CMAKE_SOURCE_DIR}/shaders
+    $<TARGET_FILE_DIR:SDFCraft>/shaders
+)

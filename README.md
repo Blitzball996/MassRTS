@@ -66,6 +66,23 @@ cd build/Release
 Warms up, orbits the camera through preset angles, writes one PNG per angle, and
 exits — handy for quickly inspecting terrain from multiple viewpoints.
 
+### SDFCraft (survival/build mode)
+
+A standalone first-person voxel survival/build mode lives in `src/sdfcraft/` and
+builds to its own executable so it never interferes with the RTS:
+
+```bash
+cd build/Release
+./SDFCraft.exe 1337    # optional: world seed
+```
+
+Infinite chunked voxel world, FPS controller, dig/place, inventory, items/tools,
+crafting and smelting. Opaque terrain is meshed with **Marching Cubes** from the
+block occupancy field (`src/sdfcraft/mc_mesher.h`), so the ground renders as a
+smooth shaded isosurface rather than blocky cubes; water/glass/leaves still use
+the cube mesher's transparent pass. See `SDF_VOXEL_TERRAIN_DESIGN.md` for the
+sculpting roadmap.
+
 ---
 
 ## Controls

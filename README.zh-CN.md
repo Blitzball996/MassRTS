@@ -59,6 +59,21 @@ cd build/Release
 
 预热后摄像机绕预设角度环绕，每个角度输出一张 PNG，然后退出——便于快速从多个视角检查地形。
 
+### SDFCraft（生存/建造模式）
+
+`src/sdfcraft/` 下有一个独立的第一人称体素生存/建造模式，编译为单独的可执行文件，
+与 RTS 互不干扰：
+
+```bash
+cd build/Release
+./SDFCraft.exe 1337    # 可选：世界种子
+```
+
+无限分块体素世界、第一人称控制、挖掘/放置、背包、物品/工具、合成与熔炼。不透明地形
+使用 **Marching Cubes** 从方块占据场（`src/sdfcraft/mc_mesher.h`）生成网格，所以地面
+渲染为平滑着色的等值面，而不是方块立方体；水/玻璃/树叶仍走方块网格的半透明通道。
+塑形路线图见 `SDF_VOXEL_TERRAIN_DESIGN.md`。
+
 ---
 
 ## 操作

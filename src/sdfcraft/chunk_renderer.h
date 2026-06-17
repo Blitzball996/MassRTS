@@ -11,6 +11,7 @@
 #include <glm/glm.hpp>
 #include "world.h"
 #include "mesher.h"
+#include "mc_mesher.h"
 #include <unordered_map>
 #include <string>
 #include <fstream>
@@ -43,7 +44,13 @@ public:
         for (auto& kv : world.chunks()) {
             Chunk& c = kv.second;
             if (!c.dirty_mesh) continue;
-            ChunkMesh m; Mesher::build(world, c, m);
+            // Opaque terrain → smooth Marching-Cubes isosurface (true SDF look).
+            // Non-opaque blocks (water/glass/leaves) → blocky faces.
+            ChunkMesh m;
+            MCMesher::build(world, c, m);   // fills m.opaque
+            ChunkMesh cube;
+            Mesher::build(world, c, cube);  // fills cube.opaque + cube.transparent
+            m.transparent = std::move(cube.transparent);
             upload(c.key, m);
             c.dirty_mesh = false;
             if (++built >= max_rebuild) break;

@@ -10,6 +10,7 @@
 #include "world.h"
 #include <glm/glm.hpp>
 #include <cmath>
+#include <algorithm>
 
 namespace sdfcraft {
 
@@ -28,6 +29,59 @@ public:
     float pitch = 0.0f;        // degrees, clamped [-89,89]
     bool  on_ground = false;
     bool  flying = false;
+
+    // --- survival stats (Phase D/E) ---
+    float health     = 20.0f;   // 10 hearts
+    float max_health = 20.0f;
+    float hunger     = 20.0f;   // 10 drumsticks
+    float saturation = 5.0f;
+    float air        = 10.0f;   // breath underwater
+    float heal_timer = 0.0f;
+    float starve_timer = 0.0f;
+    float hurt_flash = 0.0f;    // HUD red flash timer
+    bool  dead = false;
+
+    void hurt(float dmg) {
+        if (dead || dmg <= 0) return;
+        health -= dmg;
+        hurt_flash = 0.4f;
+        if (health <= 0) { health = 0; dead = true; }
+    }
+    void heal(float amt) { health = std::min(max_health, health + amt); }
+    void eat(int food) {
+        hunger = std::min(20.0f, hunger + (float)food);
+        saturation = std::min(hunger, saturation + food * 0.6f);
+    }
+
+    // Survival tick: natural regen when fed, starvation when empty, drowning
+    // when head is in water. Fall damage is handled by the caller (needs the
+    // pre-landing velocity). dt is real seconds.
+    void survival_tick(World& world, float dt) {
+        if (dead) return;
+        // slow hunger drain
+        if (saturation > 0) saturation = std::max(0.0f, saturation - dt * 0.10f);
+        else if (hunger > 0) hunger = std::max(0.0f, hunger - dt * 0.30f);
+
+        // regen when well-fed, starve when empty
+        if (hunger >= 18.0f && health < max_health) {
+            heal_timer += dt;
+            if (heal_timer >= 3.0f) { heal(1.0f); heal_timer = 0.0f; }
+        } else heal_timer = 0.0f;
+        if (hunger <= 0.0f) {
+            starve_timer += dt;
+            if (starve_timer >= 4.0f) { hurt(1.0f); starve_timer = 0.0f; }
+        } else starve_timer = 0.0f;
+
+        // drowning: head block is water
+        glm::vec3 e = eye();
+        bool head_in_water = block_is_liquid(world.get_block((int)floorf(e.x),(int)floorf(e.y),(int)floorf(e.z)));
+        if (head_in_water) {
+            air = std::max(0.0f, air - dt * 2.0f);
+            if (air <= 0.0f) hurt(dt * 2.0f);
+        } else air = std::min(10.0f, air + dt * 4.0f);
+
+        if (hurt_flash > 0) hurt_flash -= dt;
+    }
 
     // AABB half-extents (Steve-ish): 0.6 wide, 1.8 tall, eyes at 1.62
     static constexpr float HALF_W = 0.30f;
@@ -54,26 +108,51 @@ public:
         return glm::vec3(cosf(y), 0, sinf(y));
     }
 
+    float fall_start_y = 0.0f;  // y where the current fall began
+    bool  was_falling = false;
+
     // wish = horizontal input (x=strafe, z=forward) in [-1,1]; up = jump/fly up
     void update(World& world, float dt, glm::vec3 wish, bool jump, bool down) {
         glm::vec3 dir = right_flat() * wish.x + forward_flat() * wish.z;
         if (glm::length(dir) > 1e-4f) dir = glm::normalize(dir);
 
+        bool in_liquid = block_is_liquid(world.get_block(
+            (int)floorf(pos.x), (int)floorf(pos.y + 0.5f), (int)floorf(pos.z)));
+
         if (flying) {
             vel.x = dir.x * FLY_SPEED;
             vel.z = dir.z * FLY_SPEED;
             vel.y = (jump ? FLY_SPEED : 0.0f) - (down ? FLY_SPEED : 0.0f);
+            was_falling = false;
+        } else if (in_liquid) {
+            // swimming: slow, buoyant, no fall damage
+            vel.x = dir.x * WALK_SPEED * 0.6f;
+            vel.z = dir.z * WALK_SPEED * 0.6f;
+            vel.y -= GRAVITY * 0.30f * dt;
+            if (jump) vel.y = 3.0f;
+            if (vel.y < -4.0f) vel.y = -4.0f;
+            was_falling = false;
         } else {
             vel.x = dir.x * WALK_SPEED;
             vel.z = dir.z * WALK_SPEED;
             vel.y -= GRAVITY * dt;
             if (jump && on_ground) { vel.y = JUMP_V; on_ground = false; }
+            // track fall apex for fall damage
+            if (!on_ground && vel.y < 0 && !was_falling) { was_falling = true; fall_start_y = pos.y; }
         }
 
         move_axis(world, 0, vel.x * dt);
+        bool prev_ground = on_ground;
         on_ground = false;
         move_axis(world, 1, vel.y * dt);
         move_axis(world, 2, vel.z * dt);
+
+        // landed this frame -> apply fall damage beyond a 3-block safe drop
+        if (on_ground && !prev_ground && was_falling && !flying) {
+            float dist = fall_start_y - pos.y;
+            if (dist > 3.0f) hurt((dist - 3.0f) * 1.0f);
+            was_falling = false;
+        }
     }
 
     // Voxel DDA: walk the grid from the eye along `dir` up to max_dist.

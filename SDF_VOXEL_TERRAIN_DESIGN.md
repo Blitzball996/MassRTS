@@ -105,10 +105,19 @@ is the right call for an RTS — keep pathing 2.5D.
 | Phase | Deliverable | Risk |
 |------|-------------|------|
 | 0 | This doc + decide voxel size / chunk size | none |
-| 1 | SDF chunk store + base field = current terrain; render via MC; **visually identical** to today | medium (MC correctness) |
+| 1 | ✅ SDF chunk store + base field = current terrain; render via MC; **visually identical** to today | medium (MC correctness) |
 | 2 | Dig/Raise brushes with smooth blending, no UI yet (hotkey-driven), free | medium |
 | 3 | Long-press radial brush menu + money cost + Smooth/Flatten | low |
 | 4 | (optional) GPU compute meshing for big brushes; LOD for distant chunks | high |
+
+> **SDFCraft status:** Phase 1 landed for the survival/build mode. Opaque terrain
+> is now meshed with Marching Cubes (`src/sdfcraft/mc_mesher.h`, full 256-entry
+> Lorensen-Cline tables) from the block occupancy field, giving smooth shaded
+> isosurfaces instead of blocky cube faces. Non-opaque blocks (water/glass/leaves)
+> still use the cube mesher's transparent pass. Vertex format and shaders are
+> unchanged, so the renderer needed only a one-line swap in `ChunkRenderer::sync`.
+> Next: hook dig/place edits to remesh affected chunks (already wired via
+> `dirty_mesh`) and add the sculpt brushes (Phase 2).
 
 Phase 1 is the make-or-break: until MC reproduces the current look, we don't ship
 it. We keep the old heightmap terrain behind a compile flag until Phase 3 is solid.

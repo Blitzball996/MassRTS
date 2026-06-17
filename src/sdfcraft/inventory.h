@@ -19,9 +19,9 @@ using ItemId = uint16_t;
 static constexpr ItemId ITEM_NONE = 0;
 static constexpr ItemId ITEM_NONBLOCK = 256;
 
-inline bool item_is_block(ItemId id) { return id != ITEM_NONE && id < ITEM_NONBLOCK; }
-inline BlockId item_block(ItemId id) { return item_is_block(id) ? (BlockId)id : BLOCK_AIR; }
-inline ItemId block_item(BlockId b)  { return (ItemId)b; }
+inline constexpr bool item_is_block(ItemId id) { return id != ITEM_NONE && id < ITEM_NONBLOCK; }
+inline constexpr BlockId item_block(ItemId id) { return item_is_block(id) ? (BlockId)id : BLOCK_AIR; }
+inline constexpr ItemId block_item(BlockId b)  { return (ItemId)b; }
 
 struct ItemStack {
     ItemId  id    = ITEM_NONE;
@@ -43,14 +43,15 @@ public:
 
     ItemStack& held() { return slots[selected]; }
 
-    // Add items; returns leftover count that didn't fit.
-    uint8_t add(ItemId id, uint8_t n) {
-        if (id == ITEM_NONE) return 0;
+    // Add items; returns leftover count that didn't fit. `max` is the per-item
+    // stack limit (caller passes item_max_stack(id) to avoid a circular include).
+    uint8_t add(ItemId id, uint8_t n, uint8_t max = STACK_MAX) {
+        if (id == ITEM_NONE || max == 0) return 0;
         // fill existing stacks first
         for (auto& s : slots) {
             if (n == 0) break;
-            if (s.id == id && s.count < STACK_MAX) {
-                uint8_t room = (uint8_t)(STACK_MAX - s.count);
+            if (s.id == id && s.count < max) {
+                uint8_t room = (uint8_t)(max - s.count);
                 uint8_t take = n < room ? n : room;
                 s.count += take; n -= take;
             }
@@ -60,7 +61,7 @@ public:
             if (n == 0) break;
             if (s.empty()) {
                 s.id = id;
-                uint8_t take = n < STACK_MAX ? n : STACK_MAX;
+                uint8_t take = n < max ? n : max;
                 s.count = take; n -= take;
             }
         }

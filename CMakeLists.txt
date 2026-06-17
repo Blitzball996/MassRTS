@@ -51,6 +51,7 @@ list(FILTER CPU_SOURCES EXCLUDE REGEX "src/net/test_.*\.cpp$")
 list(FILTER CPU_SOURCES EXCLUDE REGEX "src/net/rts/example_usage\.cpp$")
 list(FILTER CPU_SOURCES EXCLUDE REGEX "src/net/voxel/.*\.cpp$")
 list(FILTER CPU_SOURCES EXCLUDE REGEX "src/main_sdfcraft\.cpp$")
+list(FILTER CPU_SOURCES EXCLUDE REGEX "src/sdfcraft/.*\.cpp$")
 
 # GPU target sources (exclude main.cpp, keep main_gpu.cpp)
 set(GPU_SOURCES ${ALL_SOURCES})
@@ -60,6 +61,7 @@ list(FILTER GPU_SOURCES EXCLUDE REGEX "src/net/test_.*\.cpp$")
 list(FILTER GPU_SOURCES EXCLUDE REGEX "src/net/rts/example_usage\.cpp$")
 list(FILTER GPU_SOURCES EXCLUDE REGEX "src/net/voxel/.*\.cpp$")
 list(FILTER GPU_SOURCES EXCLUDE REGEX "src/main_sdfcraft\.cpp$")
+list(FILTER GPU_SOURCES EXCLUDE REGEX "src/sdfcraft/.*\.cpp$")
 
 # === CPU Target (original, stable) ===
 add_executable(${PROJECT_NAME} ${CPU_SOURCES})
@@ -185,3 +187,8 @@ add_custom_command(TARGET SDFCraft POST_BUILD
     ${CMAKE_SOURCE_DIR}/shaders
     $<TARGET_FILE_DIR:SDFCraft>/shaders
 )
+
+# === SDFCraft headless logic test (no GL) ===
+add_executable(test_sdfcraft src/sdfcraft/selftest.cpp)
+target_include_directories(test_sdfcraft PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_sdfcraft PRIVATE glm::glm)

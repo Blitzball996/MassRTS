@@ -15,6 +15,8 @@
 #include "world.h"
 #include "player.h"
 #include "inventory.h"
+#include "items.h"
+#include "crafting.h"
 #include "chunk_renderer.h"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -38,9 +40,10 @@ struct FrameInput {
 
 class Mode {
 public:
-    World     world;
-    Player    player;
-    Inventory inv;
+    World      world;
+    Player     player;
+    Inventory  inv;
+    RecipeBook recipes;
 
     bool init(uint64_t seed, const std::string& shader_dir) {
         world = World(seed);
@@ -71,11 +74,12 @@ public:
         // --- targeting ---
         last_hit_ = player.raycast(world, 6.0f);
 
-        // --- dig (rate-limited) ---
+        // --- dig (rate-limited by block hardness / tool) ---
         dig_cooldown_ -= dt;
         if (in.dig && last_hit_.hit && dig_cooldown_ <= 0.0f) {
+            float interval = dig_interval();
             do_dig();
-            dig_cooldown_ = 0.18f;
+            dig_cooldown_ = interval;
         }
         if (!in.dig) dig_cooldown_ = 0.0f;
 
@@ -116,12 +120,31 @@ private:
     }
 
     void give_starter_items() {
-        // A creative-ish starter kit so the build loop is usable immediately.
-        inv.add(block_item(BLOCK_PLANK), 64);
-        inv.add(block_item(BLOCK_COBBLE), 64);
-        inv.add(block_item(BLOCK_GLASS), 32);
-        inv.add(block_item(BLOCK_TORCH), 16);
-        inv.add(block_item(BLOCK_LOG), 16);
+        // A small starter kit so the build/craft loop is usable immediately.
+        inv.add(block_item(BLOCK_LOG), 16, item_max_stack(block_item(BLOCK_LOG)));
+        inv.add(block_item(BLOCK_COBBLE), 32, STACK_MAX);
+        inv.add(ITEM_WOOD_PICKAXE, 1, 1);
+        inv.add(block_item(BLOCK_TORCH), 16, STACK_MAX);
+    }
+
+    // Craft using a grid snapshot (row-major gw*gh). On success, consumes one of
+    // each grid item and adds the result to the inventory. Returns true if crafted.
+    bool try_craft(const ItemId* grid, int gw, int gh) {
+        CraftResult res = recipes.match(grid, gw, gh);
+        if (res.id == ITEM_NONE) return false;
+        // consume one of each non-empty grid cell from the inventory
+        for (int i = 0; i < gw*gh; i++) {
+            if (grid[i] == ITEM_NONE) continue;
+            consume_one(grid[i]);
+        }
+        inv.add(res.id, res.count, item_max_stack(res.id));
+        return true;
+    }
+
+    void consume_one(ItemId id) {
+        for (auto& s : inv.slots) {
+            if (s.id == id && s.count > 0) { if (--s.count == 0) s.clear(); return; }
+        }
     }
 
     // Load chunks within view_radius, unload well beyond it (hysteresis).
@@ -145,7 +168,27 @@ private:
         BlockId b = world.get_block(last_hit_.bx, last_hit_.by, last_hit_.bz);
         if (b == BLOCK_AIR || b == BLOCK_BEDROCK) return;
         world.set_block(last_hit_.bx, last_hit_.by, last_hit_.bz, BLOCK_AIR);
-        inv.add(block_item(b), 1); // drop straight into inventory (Phase D: dropped entity)
+        // tier gate: ores/stone drop nothing without a strong enough tool
+        const ItemDef& tool = item_def(inv.held().id);
+        uint8_t need = block_min_tier(b);
+        bool right_tool = (block_pref_tool(b) == ToolKind::None) ||
+                          (tool.tool == block_pref_tool(b));
+        if (need > 0 && (!right_tool || tool.tier < need)) return; // no drop
+        BlockId drop = (b == BLOCK_STONE) ? BLOCK_COBBLE
+                     : (b == BLOCK_GRASS) ? BLOCK_DIRT
+                     : b;
+        inv.add(block_item(drop), 1, item_max_stack(block_item(drop)));
+    }
+
+    // Dig cooldown scaled by tool match (faster with the right tool/tier).
+    float dig_interval() {
+        BlockId b = world.get_block(last_hit_.bx, last_hit_.by, last_hit_.bz);
+        const ItemDef& tool = item_def(inv.held().id);
+        float base = block_def(b).hardness;
+        if (base <= 0.0f) return 0.12f;
+        float mult = (tool.tool == block_pref_tool(b)) ? tool.dig_mult : 1.0f;
+        float t = (base / mult) * 0.18f;
+        return t < 0.08f ? 0.08f : (t > 1.2f ? 1.2f : t);
     }
 
     void do_place() {

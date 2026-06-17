@@ -17,7 +17,7 @@
 
 - [x] 阶段 A：基础设施与模式骨架（独立 SDFCraft.exe + 第一人称 + 区块世界渲染）
 - [~] 阶段 B：最小可玩循环（MVP）（单机挖/放/走已通；多人同步待 N 阶段网络层接入）
-- [ ] 阶段 C：物品 / 背包 / 合成
+- [~] 阶段 C：物品 / 背包 / 合成（物品/工具/合成/熔炼逻辑已通；容器UI与掉落实体待 F/O）
 - [ ] 阶段 D：实体 / 生物 / AI
 - [ ] 阶段 E：战斗 / 生存数值
 - [ ] 阶段 F：方块功能与方块实体（容器/熔炉/工作台）
@@ -155,22 +155,25 @@ client = 连接服务器，本地预测 + 网络确认
 > `WorkbenchTile.cpp`, `InventoryMenu.cpp`, `Slot.cpp`
 
 ### C1. 物品系统
-- [ ] `Item` / `ItemInstance`（id + count + 耐久 + auxData），移植 `Item.h` / `ItemInstance.h`
-- [ ] 物品注册表（方块对应物品 `TileItem`，工具 `DiggerItem/PickaxeItem/...`）
-- [ ] 物品掉落实体 `ItemEntity`（移植 `ItemEntity.cpp`），拾取逻辑
+- [x] `Item` / `ItemStack`（id + count + 每物品 max_stack），`items.h` / `inventory.h`
+- [x] 物品注册表（方块物品 id 映射 + 工具 Pickaxe/Axe/Shovel/Sword × 木/石/铁/钻 + 食物/材料）
+- [~] 物品掉落实体 `ItemEntity`（当前挖掘直接进背包；地面掉落实体留待 D 阶段）
 
 ### C2. 背包与容器
-- [ ] `Inventory`（36 格 + 装备 + 副手），移植 `Inventory.cpp`
-- [ ] 快捷栏 hotbar + 选中槽（`SetCarriedItemPacket`）
-- [ ] 容器基类 `Container` / `AbstractContainerMenu` / `Slot`
-- [ ] **网络：** `ContainerSetContentPacket` / `ContainerSetSlotPacket` / `ContainerClickPacket`（服务器权威库存）
+- [x] `Inventory`（36 格：9 hotbar + 27 主仓），按物品堆叠上限合并（`inventory.h`）
+- [x] 快捷栏 hotbar + 选中槽（数字键 1-9 + 滚轮切换）
+- [~] 容器基类 `Container` / `Slot`（合成在 mode 内实现；通用容器抽象待 F 阶段）
+- [ ] **网络：** `ContainerSetContentPacket` 等（服务器权威库存，待 N 阶段）
 
 ### C3. 合成
-- [ ] 配方系统 `Recipes`（shaped + shapeless），移植 `Recipes.cpp` 全部配方
-- [ ] 2x2 玩家合成 + 3x3 工作台（`CraftingMenu` / `WorkbenchTile`）
-- [ ] 熔炼配方 `FurnaceRecipes`、附魔/铁砧后续阶段
+- [x] 配方系统 `RecipeBook`（shaped 偏移容错 + shapeless 多重集匹配），`crafting.h`
+- [x] 2x2 玩家合成 + 3x3 工作台（`try_craft(grid,gw,gh)` 支持两种网格）
+- [x] 熔炼配方 `smelt()` + 燃料 `is_fuel()`（矿石→锭、沙→玻璃、圆石→石、生猪排→熟）
+- [x] 全套工具配方 + 木板/木棍/工作台/熔炉/火把配方
 
-**C 阶段自测：** 挖石头进背包，打开工作台合成工具，物品掉落能拾取，多人库存一致。
+**C 阶段自测：** 2025-xx，`test_sdfcraft.exe` 全部通过（合成原木→木板、木板→木棍、
+2x2工作台、3x3木镐、熔炼铁锭/玻璃、燃料判定、背包堆叠上限、世界种子确定性、方块编辑往返）。✅
+工具挖掘加速 + 矿石按工具等级掉落已接入 `mode.h`。
 
 ---
 

@@ -46,10 +46,18 @@ file(GLOB_RECURSE ALL_SOURCES "src/*.cpp" "src/*.c")
 # CPU target sources (exclude main_gpu.cpp)
 set(CPU_SOURCES ${ALL_SOURCES})
 list(FILTER CPU_SOURCES EXCLUDE REGEX "main_gpu\.cpp$")
+list(FILTER CPU_SOURCES EXCLUDE REGEX "src/main\.cpp$")
+list(FILTER CPU_SOURCES EXCLUDE REGEX "src/net/test_.*\.cpp$")
+list(FILTER CPU_SOURCES EXCLUDE REGEX "src/net/rts/example_usage\.cpp$")
+list(FILTER CPU_SOURCES EXCLUDE REGEX "src/net/voxel/.*\.cpp$")
 
 # GPU target sources (exclude main.cpp, keep main_gpu.cpp)
 set(GPU_SOURCES ${ALL_SOURCES})
 list(FILTER GPU_SOURCES EXCLUDE REGEX "src/main\.cpp$")
+list(FILTER GPU_SOURCES EXCLUDE REGEX "src/main_net\.cpp$")
+list(FILTER GPU_SOURCES EXCLUDE REGEX "src/net/test_.*\.cpp$")
+list(FILTER GPU_SOURCES EXCLUDE REGEX "src/net/rts/example_usage\.cpp$")
+list(FILTER GPU_SOURCES EXCLUDE REGEX "src/net/voxel/.*\.cpp$")
 
 # === CPU Target (original, stable) ===
 add_executable(${PROJECT_NAME} ${CPU_SOURCES})
@@ -100,3 +108,57 @@ add_custom_command(TARGET MassRTS_GPU POST_BUILD
     ${CMAKE_SOURCE_DIR}/shaders
     $<TARGET_FILE_DIR:MassRTS_GPU>/shaders
 )
+
+# === Network Test (rollback + fixed-point) ===
+add_executable(test_net src/net/test_rollback.cpp src/net/core/rollback_engine.cpp)
+target_include_directories(test_net PRIVATE ${CMAKE_SOURCE_DIR}/src)
+if(WIN32)
+    target_link_libraries(test_net PRIVATE ws2_32)
+endif()
+
+# === Voxel Network Test ===
+add_executable(test_voxel src/net/test_voxel.cpp)
+target_include_directories(test_voxel PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_voxel PRIVATE glm::glm)
+if(WIN32)
+    target_link_libraries(test_voxel PRIVATE ws2_32)
+endif()
+
+# === Zlib for compression ===
+FetchContent_Declare(
+    zlib
+    GIT_REPOSITORY https://github.com/madler/zlib.git
+    GIT_TAG v1.3.1
+)
+set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(zlib)
+
+# === Link zlib into main network-enabled targets ===
+target_include_directories(${PROJECT_NAME} PRIVATE ${zlib_SOURCE_DIR} ${zlib_BINARY_DIR})
+target_link_libraries(${PROJECT_NAME} PRIVATE zlibstatic)
+target_include_directories(MassRTS_GPU PRIVATE ${zlib_SOURCE_DIR} ${zlib_BINARY_DIR})
+target_link_libraries(MassRTS_GPU PRIVATE zlibstatic)
+
+# === Compression Test ===
+add_executable(test_compression src/net/test_compression.cpp)
+target_include_directories(test_compression PRIVATE ${CMAKE_SOURCE_DIR}/src ${zlib_SOURCE_DIR} ${zlib_BINARY_DIR})
+target_link_libraries(test_compression PRIVATE zlibstatic)
+if(WIN32)
+    target_link_libraries(test_compression PRIVATE ws2_32)
+endif()
+
+# === TCP FileTransfer Test ===
+add_executable(test_tcp src/net/test_tcp.cpp)
+target_include_directories(test_tcp PRIVATE ${CMAKE_SOURCE_DIR}/src ${zlib_SOURCE_DIR} ${zlib_BINARY_DIR})
+target_link_libraries(test_tcp PRIVATE zlibstatic)
+if(WIN32)
+    target_link_libraries(test_tcp PRIVATE ws2_32)
+endif()
+
+# === Persistence Test ===
+add_executable(test_persistence src/net/test_persistence.cpp)
+target_include_directories(test_persistence PRIVATE ${CMAKE_SOURCE_DIR}/src ${zlib_SOURCE_DIR} ${zlib_BINARY_DIR})
+target_link_libraries(test_persistence PRIVATE zlibstatic)
+if(WIN32)
+    target_link_libraries(test_persistence PRIVATE ws2_32)
+endif()

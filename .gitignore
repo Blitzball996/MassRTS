@@ -1,0 +1,35 @@
+# Build output
+/build/
+build/
+out/
+cmake-build-*/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+*.cmake
+!cmake/*.cmake
+
+# Compiled binaries / objects
+*.obj
+*.o
+*.exe
+*.dll
+*.lib
+*.a
+*.pdb
+*.ilk
+*.exp
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# Misc
+*.log
+*.tmp
+__pycache__/
+*.pyc

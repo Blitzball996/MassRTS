@@ -18,12 +18,14 @@
 #include "items.h"
 #include "crafting.h"
 #include "chunk_renderer.h"
+#include "world_ops.h"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
 #include <vector>
 #include <array>
 #include <algorithm>
+#include <memory>
 
 namespace sdfcraft {
 
@@ -50,10 +52,20 @@ public:
 
     bool init(uint64_t seed, const std::string& shader_dir) {
         world = World(seed);
+        // Replication seam: default to the local backend (single-player / host /
+        // client prediction). Multiplayer swaps this for NetWorldOps without any
+        // change to gameplay code below — every edit already flows through ops_.
+        ops_ = std::make_unique<LocalWorldOps>(world);
         if (!renderer_.init(shader_dir)) return false;
         spawn_player();
         give_starter_items();
         return true;
+    }
+
+    // Multiplayer entry point (network phase): replace the local backend with a
+    // server-authoritative + client-prediction backend. Gameplay is untouched.
+    void useNetworkOps(bool is_server) {
+        ops_ = std::make_unique<NetWorldOps>(world, is_server);
     }
     void shutdown() { renderer_.shutdown(); }
 
@@ -69,6 +81,10 @@ public:
         if (in.hotbar_scroll) inv.scroll(in.hotbar_scroll);
 
         stream_chunks(view_radius);
+
+        // Pump the replication backend (no-op locally; polls net + reconciles
+        // when networked). Keeps gameplay identical across single/multiplayer.
+        if (ops_) ops_->tick(dt);
 
         // --- physics ---
         glm::vec3 wish(in.move_x, 0, in.move_z);
@@ -114,6 +130,7 @@ public:
 
 private:
     ChunkRenderer renderer_;
+    std::unique_ptr<WorldOps> ops_;   // replication seam (local or networked)
     RayHit last_hit_;
     float  dig_cooldown_ = 0.0f;
     float  dig_radius_ = 1.8f;   // smooth spherical carve radius (blocks), MassRTS-style
@@ -207,7 +224,9 @@ private:
         const ItemDef& tool = item_def(inv.held().id);
         glm::vec3 hp = last_hit_.point;
         std::vector<std::array<int,4>> flips;
-        world.carve_sphere(hp.x, hp.y, hp.z, dig_radius_, -1, &flips);
+        // Route through the replication seam (local apply + prediction; the
+        // network backend additionally sends/validates/broadcasts the edit).
+        ops_->carveSphere(hp.x, hp.y, hp.z, dig_radius_, -1, &flips);
 
         for (auto& f : flips) {
             BlockId b = (BlockId)f[3];
@@ -241,7 +260,8 @@ private:
         int pz = last_hit_.bz + last_hit_.nz;
         if (world.get_block(px, py, pz) != BLOCK_AIR) return;
         if (overlaps_player(px, py, pz)) return; // don't seal yourself in
-        if (world.set_block(px, py, pz, item_block(h.id)))
+        // Route through replication seam (local apply now; net send when online).
+        if (ops_->setBlock(px, py, pz, item_block(h.id)))
             inv.consume_held();
     }
 

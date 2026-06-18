@@ -23,6 +23,7 @@
 #include <cmath>
 #include <vector>
 #include <array>
+#include <algorithm>
 
 namespace sdfcraft {
 
@@ -151,13 +152,40 @@ private:
     }
 
     // Load chunks within view_radius, unload well beyond it (hysteresis).
-    void stream_chunks(int view_radius) {
+    // CRITICAL fix for the "walk a bit then freeze" stutter: chunk generation
+    // (noise + trees + ores) is expensive, and crossing a chunk border used to
+    // pull a whole ring of brand-new chunks into existence *in a single frame*,
+    // stalling the main thread for hundreds of ms. We now apply a per-frame
+    // GENERATION BUDGET: only the few nearest not-yet-loaded chunks are created
+    // each frame, nearest first, and the rest stream in over subsequent frames.
+    // Meshing is already bounded (ChunkRenderer::sync max_rebuild), so the two
+    // together keep frame time flat while exploring the infinite world.
+    void stream_chunks(int view_radius, int gen_budget = 4) {
         ChunkKey center = World::world_to_chunk((int)floorf(player.pos.x), (int)floorf(player.pos.z));
+
+        // Gather missing chunks in the view disk, sorted by distance (nearest
+        // first) so the ground under/around the player always fills in first.
+        struct Pend { int dx, dz, d2; };
+        std::vector<Pend> pending;
         for (int dz = -view_radius; dz <= view_radius; dz++)
         for (int dx = -view_radius; dx <= view_radius; dx++) {
-            if (dx*dx + dz*dz > view_radius*view_radius) continue;
-            world.get_chunk({center.cx + dx, center.cz + dz}, true);
+            int d2 = dx*dx + dz*dz;
+            if (d2 > view_radius*view_radius) continue;
+            ChunkKey k{center.cx + dx, center.cz + dz};
+            if (!world.chunk_loaded(k)) pending.push_back({dx, dz, d2});
         }
+        std::sort(pending.begin(), pending.end(),
+                  [](const Pend& a, const Pend& b){ return a.d2 < b.d2; });
+
+        int made = 0;
+        for (const Pend& p : pending) {
+            if (made >= gen_budget) break;   // spread the rest over later frames
+            world.get_chunk({center.cx + p.dx, center.cz + p.dz}, true);
+            made++;
+        }
+
+        // Unload chunks well past the view radius (hysteresis avoids thrashing
+        // at the boundary as the player paces back and forth).
         int unload = view_radius + 3;
         auto& cm = world.chunks();
         for (auto it = cm.begin(); it != cm.end();) {

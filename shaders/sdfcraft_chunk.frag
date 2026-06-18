@@ -61,21 +61,42 @@ vec3 terrain_surface(vec2 wpos, float slope, vec3 n) {
     float peb = noise(wpos*0.6 + vec2(v_world.y));
     dirt = mix(dirt, vec3(0.20,0.18,0.16), smoothstep(0.6,0.8,peb)*0.4);
 
-    // --- rock (steep faces / deep subsurface) ---
-    vec3 rock_a=vec3(0.42,0.42,0.43), rock_b=vec3(0.30,0.30,0.31), rock_c=vec3(0.50,0.50,0.51);
-    float rough = warped_fbm(wpos*0.04);
-    vec3 rock = mix(rock_a, rock_b, rough);
-    float band = sin(v_world.y*0.55 + noise(wpos*0.05)*2.5)*0.5+0.5;
-    rock = mix(rock, rock_c, smoothstep(0.55,0.85,band)*0.4);
-    float vein = smoothstep(0.8,0.92, noise(wpos*0.3 + v_world.y*0.2));
-    rock = mix(rock, vec3(0.58,0.58,0.60), vein*0.25);
+    // --- rock (steep faces / deep subsurface) with CONTINUOUS strata ---
+    // Depth-banded sedimentary layers so a dug-out cross-section reads as rich
+    // geology instead of flat grey. Bands are driven by world height with soft
+    // smoothstep edges (no hard seams) and slowly wander via low-freq noise.
+    vec3 rock_top   = vec3(0.46,0.44,0.42); // near-surface pale rock
+    vec3 rock_mid   = vec3(0.34,0.33,0.34); // mid grey granite
+    vec3 rock_deep  = vec3(0.30,0.27,0.24); // warm deep stone
+    vec3 rock_base  = vec3(0.24,0.22,0.26); // cold basement rock
+    float wob = noise(wpos*0.02) * 6.0;       // layer boundaries undulate
+    float y   = v_world.y + wob;
+    vec3 rock = rock_top;
+    rock = mix(rock, rock_mid,  smoothstep(48.0, 30.0, y));
+    rock = mix(rock, rock_deep, smoothstep(28.0, 14.0, y));
+    rock = mix(rock, rock_base, smoothstep(12.0,  2.0, y));
+    // fine strata striping within the bands
+    float strata = sin(y*0.8 + noise(wpos*0.06)*3.0)*0.5 + 0.5;
+    rock = mix(rock, rock*1.18, smoothstep(0.55,0.9,strata)*0.5);
+    float rough = warped_fbm(wpos*0.04 + y*0.05);
+    rock = mix(rock*0.9, rock*1.1, rough);
+    float vein = smoothstep(0.82,0.93, noise(wpos*0.3 + y*0.2));
+    rock = mix(rock, vec3(0.58,0.55,0.50), vein*0.3);
 
-    // Continuous slope blend: grass -> dirt -> rock. Soft smoothstep edges mean
-    // the transition dissolves smoothly across the rounded MC surface instead of
-    // snapping at block faces. Grass dominates anything near-flat.
+    // Continuous slope + depth blend: grass -> dirt -> rock. Grass dominates
+    // near-flat ground at the surface. As you dig down, the dirt shell is thin
+    // and rock takes over with depth, so a carved pit shows grass rim -> dirt
+    // band -> layered rock floor, all dissolving smoothly (no one-tone grey wall
+    // and no hard material seams that read as faceted polygons).
+    float surf  = smoothstep(40.0, 8.0, v_world.y);   // 0 at surface, 1 deep
     vec3 col = grass;
-    col = mix(col, dirt, smoothstep(0.25, 0.55, slope));
-    col = mix(col, rock, smoothstep(0.60, 0.85, slope));
+    // dirt appears on moderate slopes, and everywhere just below the surface
+    float dirt_amt = max(smoothstep(0.20, 0.45, slope),
+                         smoothstep(0.15, 0.55, surf) * (1.0 - smoothstep(0.0, 0.35, slope)) );
+    col = mix(col, dirt, clamp(dirt_amt, 0.0, 1.0));
+    // rock on steep faces, and dominating with depth
+    float rock_amt = max(smoothstep(0.55, 0.82, slope), surf*surf);
+    col = mix(col, rock, clamp(rock_amt, 0.0, 1.0));
     return col;
 }
 

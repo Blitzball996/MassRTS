@@ -142,10 +142,12 @@ public:
             if (!on_ground && vel.y < 0 && !was_falling) { was_falling = true; fall_start_y = pos.y; }
         }
 
-        move_axis(world, 0, vel.x * dt);
         bool prev_ground = on_ground;
+        step_grounded_ = prev_ground;   // both horizontal axes may step-up
+        move_axis(world, 0, vel.x * dt);
         on_ground = false;
         move_axis(world, 1, vel.y * dt);
+        step_grounded_ = prev_ground;   // restore for z (axis 1 may have cleared)
         move_axis(world, 2, vel.z * dt);
 
         // landed this frame -> apply fall damage beyond a 3-block safe drop
@@ -212,24 +214,73 @@ private:
         return block_is_solid(world.get_block(x, y, z));
     }
 
-    // Does the player AABB at position p overlap any solid block?
+    // True if the world is solid at world-point p. Terrain uses the CONTINUOUS
+    // SDF (negative = inside ground) so the collision body matches the smooth
+    // surface the player actually sees — the old per-block test collided with
+    // invisible integer-height steps on slopes, which is what jammed the player
+    // when walking uphill. Object blocks (logs, placed blocks) are not part of
+    // the SDF field, so we still test those discretely.
+    bool point_solid(World& world, float x, float y, float z) {
+        if (world.sample_sdf(x, y, z) < 0.0f) return true;            // smooth terrain
+        BlockId b = world.get_block((int)floorf(x),(int)floorf(y),(int)floorf(z));
+        return block_is_solid(b) && !block_is_terrain(b);             // trees/placed
+    }
+
+    // Does the player capsule/AABB at position p overlap solid ground? Samples a
+    // small set of points around the AABB (cheap and matches the smooth field).
     bool collides(World& world, glm::vec3 p) {
-        float minx = p.x - HALF_W, maxx = p.x + HALF_W;
-        float miny = p.y,          maxy = p.y + HEIGHT;
-        float minz = p.z - HALF_W, maxz = p.z + HALF_W;
-        for (int bx = (int)floorf(minx); bx <= (int)floorf(maxx); bx++)
-        for (int by = (int)floorf(miny); by <= (int)floorf(maxy); by++)
-        for (int bz = (int)floorf(minz); bz <= (int)floorf(maxz); bz++)
-            if (solid_at(world, bx, by, bz)) return true;
+        const float w = HALF_W;
+        // sample at feet, mid, head over a 3x3 footprint
+        static const float ys[3] = {0.10f, HEIGHT*0.5f, HEIGHT-0.10f};
+        for (float yy : ys)
+        for (int sx = -1; sx <= 1; sx++)
+        for (int sz = -1; sz <= 1; sz++) {
+            if (point_solid(world, p.x + sx*w, p.y + yy, p.z + sz*w)) return true;
+        }
         return false;
     }
 
+    // Vertical clearance check used by step-up: is the column at (p) free over
+    // the player's full height? (so we don't step into a low ceiling).
+    bool head_clear(World& world, glm::vec3 p) {
+        return !collides(world, p);
+    }
+
     // Move along a single axis, stopping flush against the first collision.
+    // Horizontal moves (x/z) that hit terrain attempt an automatic STEP-UP: if
+    // raising the player by up to MAX_STEP clears the obstruction, we climb it.
+    // This is what lets the player walk smoothly up steep slopes (up to ~75°+)
+    // and over small ledges instead of jamming against the SDF surface.
+    static constexpr float MAX_STEP = 1.1f;   // max auto-climb height (blocks)
+    bool step_grounded_ = false;              // last-frame ground state for step-up
+
     void move_axis(World& world, int axis, float amount) {
         if (amount == 0.0f) return;
         glm::vec3 np = pos;
         np[axis] += amount;
         if (!collides(world, np)) { pos = np; return; }
+
+        // --- horizontal collision: try to step up the slope/ledge ---
+        if (axis != 1 && step_grounded_) {
+            // Probe increasing lift heights; take the smallest that frees both
+            // the new horizontal position AND leaves head clearance.
+            for (float lift = 0.20f; lift <= MAX_STEP; lift += 0.20f) {
+                glm::vec3 stepped = np;
+                stepped.y += lift;
+                if (!collides(world, stepped)) {
+                    // settle back down onto the surface so we hug the slope
+                    glm::vec3 settled = stepped;
+                    float drop = 0.0f;
+                    for (; drop < lift + 0.05f; drop += 0.05f) {
+                        glm::vec3 d = stepped; d.y -= (drop + 0.05f);
+                        if (collides(world, d)) break;
+                    }
+                    settled.y -= drop;
+                    if (!collides(world, settled)) { pos = settled; on_ground = true; return; }
+                }
+            }
+        }
+
         // collision on this axis: zero velocity, then binary-search the largest
         // safe sub-step so we end up flush against the contact face.
         if (axis == 1) { if (amount < 0) on_ground = true; vel.y = 0.0f; }

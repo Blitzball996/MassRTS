@@ -1,6 +1,7 @@
 // Headless self-test for SDFCraft data logic (no GL). Compiled ad-hoc.
 #include "sdfcraft/crafting.h"
 #include "sdfcraft/world.h"
+#include "sdfcraft/planet.h"
 #include <cstdio>
 #include <cassert>
 using namespace sdfcraft;
@@ -51,6 +52,37 @@ int main() {
       w.set_block(0,h+5,0, BLOCK_GLASS);
       CHECK(w.get_block(0,h+5,0) == BLOCK_GLASS);
       CHECK(!w.set_block(0,h+5,0, BLOCK_GLASS)); /* no change */ }
+
+    // --- planet math (Phase P1) ---
+    {
+        PlanetConfig cfg; LodPolicy pol;
+        // cube-sphere round-trip: face+uv -> dir -> face+uv recovers the inputs
+        for (int fi=0; fi<6; fi++) {
+            CubeFace f=(CubeFace)fi;
+            double u=0.3, v=-0.6;
+            dvec3 dir = cube_to_unit_sphere(f,u,v);
+            CHECK(fabs(glm::length(dir)-1.0) < 1e-9);   // on unit sphere
+            CubeFace rf; double ru,rv; unit_sphere_to_cube(dir, rf, ru, rv);
+            CHECK(rf==f && fabs(ru-u)<1e-6 && fabs(rv-v)<1e-6);
+        }
+        // floating origin: a point 1m from a camera 6.37e6 m out stays exact
+        dvec3 cam(cfg.radius_m, 0, 0);
+        dvec3 near = cam + dvec3(1.0, 0.5, -0.25);
+        glm::vec3 r = to_render_space(near, cam);
+        CHECK(fabs(r.x-1.0f)<1e-4 && fabs(r.y-0.5f)<1e-4 && fabs(r.z+0.25f)<1e-4);
+        // LOD: root node far away should NOT subdivide; up close it should
+        QuadNode root{ FACE_PX, 0, -1,-1, 1,1 };
+        dvec3 far_cam = root.center_dir()*(cfg.radius_m*20.0);
+        CHECK(!should_subdivide(cfg, root, far_cam, pol));
+        dvec3 close_cam = root.center_dir()*(cfg.radius_m + 100.0);
+        CHECK(should_subdivide(cfg, root, close_cam, pol));
+        // split produces 4 children covering the parent area
+        split_quad(root);
+        CHECK(root.has_children && root.child[0] && root.child[3]);
+        CHECK(root.child[0]->level==1);
+        free_quad(&root);
+        CHECK(!root.has_children);
+    }
 
     if (fails == 0) printf("ALL SDFCRAFT TESTS PASSED\n");
     else printf("%d TEST(S) FAILED\n", fails);

@@ -39,6 +39,7 @@ struct FrameInput {
     bool  dig = false;       // left click held
     bool  place = false;     // right click (edge)
     bool  toggle_fly = false;
+    bool  fly_boost = false;  // hold to fly fast (planet-scale travel)
     int   hotbar_set = -1;   // 0..8 to set slot directly, -1 = none
     int   hotbar_scroll = 0; // wheel
 };
@@ -88,7 +89,8 @@ public:
 
         // --- physics ---
         glm::vec3 wish(in.move_x, 0, in.move_z);
-        player.update(world, dt, wish, in.jump, in.crouch);
+        player.update(world, dt, wish, in.jump, in.crouch,
+                      in.fly_boost ? 12.0f : 1.0f);
 
         // --- targeting ---
         last_hit_ = player.raycast(world, 6.0f);
@@ -117,7 +119,7 @@ public:
         glEnable(GL_DEPTH_TEST);
         glEnable(GL_CULL_FACE); glCullFace(GL_BACK); glFrontFace(GL_CCW);
 
-        renderer_.sync(world);
+        renderer_.sync(world, player.eye());
         glm::vec3 sun = glm::normalize(glm::vec3(0.4f, 0.85f, 0.3f));
         float fog_end = (8 * CHUNK_SX) * 0.95f;
         renderer_.render(world, view, proj, player.eye(), sun, sky, fog_end * 0.55f, fog_end);

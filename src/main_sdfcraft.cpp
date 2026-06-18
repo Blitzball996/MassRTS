@@ -82,6 +82,7 @@ int main(int argc, char** argv) {
         in.dig    = glfwGetMouseButton(win, GLFW_MOUSE_BUTTON_LEFT)==GLFW_PRESS;
         in.place  = g_place_edge;       g_place_edge = false;
         in.toggle_fly = g_fly_edge;     g_fly_edge = false;
+        in.fly_boost  = glfwGetKey(win, GLFW_KEY_LEFT_CONTROL)==GLFW_PRESS;
         in.look_dx = g_look_dx;         g_look_dx = 0;
         in.look_dy = g_look_dy;         g_look_dy = 0;
         in.hotbar_scroll = g_wheel;     g_wheel = 0;

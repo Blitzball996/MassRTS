@@ -17,6 +17,9 @@
 #include <fstream>
 #include <sstream>
 #include <iostream>
+#include <vector>
+#include <algorithm>
+#include <chrono>
 
 namespace sdfcraft {
 
@@ -39,11 +42,29 @@ public:
     }
 
     // Rebuild GPU meshes for any dirty/loaded chunks (bounded per frame).
-    void sync(World& world, int max_rebuild = 8) {
-        int built = 0;
-        for (auto& kv : world.chunks()) {
-            Chunk& c = kv.second;
-            if (!c.dirty_mesh) continue;
+    // Re-mesh dirty chunks under a TIME BUDGET (default ~4ms/frame). The old
+    // fixed-count limit still spiked when several heavy chunks landed in one
+    // frame; a wall-clock budget instead guarantees a flat frame time no matter
+    // how many chunks flooded in when crossing into a new region — the rest
+    // simply finish over the next few frames. Nearest-to-camera chunks are
+    // meshed first so the ground around the player resolves immediately.
+    void sync(World& world, glm::vec3 cam, double budget_ms = 4.0) {
+        // collect dirty chunks, nearest first
+        struct D { Chunk* c; float d2; };
+        std::vector<D> dirty;
+        for (auto& kv : world.chunks())
+            if (kv.second.dirty_mesh) {
+                float cx = (kv.first.cx + 0.5f) * CHUNK_SX;
+                float cz = (kv.first.cz + 0.5f) * CHUNK_SZ;
+                float dx = cx - cam.x, dz = cz - cam.z;
+                dirty.push_back({ &kv.second, dx*dx + dz*dz });
+            }
+        std::sort(dirty.begin(), dirty.end(),
+                  [](const D& a, const D& b){ return a.d2 < b.d2; });
+
+        auto t0 = std::chrono::steady_clock::now();
+        for (D& d : dirty) {
+            Chunk& c = *d.c;
             // Natural terrain → smooth Marching-Cubes isosurface (true SDF look).
             // Object blocks (logs/leaves/planks/glass/placed) → discrete cubes.
             ChunkMesh m;
@@ -57,7 +78,9 @@ public:
             m.transparent = std::move(cube.transparent);
             upload(c.key, m);
             c.dirty_mesh = false;
-            if (++built >= max_rebuild) break;
+            double el = std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - t0).count();
+            if (el >= budget_ms) break;     // out of time; continue next frame
         }
         // drop GPU buffers for chunks the world no longer holds
         for (auto it = gpu_.begin(); it != gpu_.end();) {

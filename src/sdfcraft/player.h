@@ -112,8 +112,10 @@ public:
     float fall_start_y = 0.0f;  // y where the current fall began
     bool  was_falling = false;
 
-    // wish = horizontal input (x=strafe, z=forward) in [-1,1]; up = jump/fly up
-    void update(World& world, float dt, glm::vec3 wish, bool jump, bool down) {
+    // wish = horizontal input (x=strafe, z=forward) in [-1,1]; up = jump/fly up.
+    // fly_boost multiplies fly speed (hold to cover planet-scale distances fast).
+    void update(World& world, float dt, glm::vec3 wish, bool jump, bool down,
+                float fly_boost = 1.0f) {
         glm::vec3 dir = right_flat() * wish.x + forward_flat() * wish.z;
         if (glm::length(dir) > 1e-4f) dir = glm::normalize(dir);
 
@@ -121,9 +123,16 @@ public:
             (int)floorf(pos.x), (int)floorf(pos.y + 0.5f), (int)floorf(pos.z)));
 
         if (flying) {
-            vel.x = dir.x * FLY_SPEED;
-            vel.z = dir.z * FLY_SPEED;
-            vel.y = (jump ? FLY_SPEED : 0.0f) - (down ? FLY_SPEED : 0.0f);
+            // free-fly: full 3D, no gravity/collision-stop on the vertical input.
+            // Boosted speed lets you fly up to orbit / across the planet quickly.
+            float fs = FLY_SPEED * fly_boost;
+            // fly in the FULL look direction (incl. pitch) when moving forward,
+            // so you can ascend toward space just by looking up and holding W.
+            glm::vec3 look = forward();
+            glm::vec3 flyDir = right_flat()*wish.x + look*wish.z;
+            if (glm::length(flyDir) > 1e-4f) flyDir = glm::normalize(flyDir);
+            vel = flyDir * fs;
+            vel.y += (jump ? fs : 0.0f) - (down ? fs : 0.0f);
             was_falling = false;
         } else if (in_liquid) {
             // swimming: slow, buoyant, no fall damage

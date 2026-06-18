@@ -395,44 +395,42 @@ private:
 
     void maybe_tree(Chunk& c, int lx, int lz, int wx, int wz, int h) {
         // keep trunks away from chunk borders so the (wider) canopy stays inside
-        if (lx < 3 || lx > CHUNK_SX - 4 || lz < 3 || lz > CHUNK_SZ - 4) return;
+        if (lx < 4 || lx > CHUNK_SX - 5 || lz < 4 || lz > CHUNK_SZ - 5) return;
         if (noise_.rand2(wx, wz) < 0.985f) return;
 
-        // Classic full oak: tall trunk + a rounded multi-layer canopy that
-        // actually fills in (no see-through hollow). Canopy is built bottom-up
-        // with a radius that bulges in the middle and tapers to a tip, and we
-        // fill every cell within the layer radius (distance test), so leaves are
-        // solid rather than a thin ring.
-        int trunk = 5 + (int)(noise_.rand2(wx + 99, wz - 99) * 3.0f); // 5..7
+        // Varied oak: taller trunk + a full, layered rounded canopy. Tree size
+        // varies per-position so forests look natural (mix of short & tall).
+        float sz = noise_.rand2(wx + 99, wz - 99);
+        int trunk = 6 + (int)(sz * 5.0f);              // 6..10 tall
         for (int i = 1; i <= trunk; i++) c.set(lx, h + i, lz, BLOCK_LOG);
         int top = h + trunk;
 
-        // Canopy spans from a couple blocks below the top up past it. Radius per
-        // layer: widest in the lower-middle, shrinking to 1 at the crown.
-        // layer offset dy -> radius
-        const int   lo = -3, hi = 2;
+        // Canopy: 5 layers from (top-3) up to (top+1), radius bulging in the
+        // lower-middle (broad, r=3) and tapering to the crown. Distance test
+        // fills every cell so the foliage is solid (no see-through hollow).
+        const int lo = -3, hi = 1;
         for (int dy = lo; dy <= hi; dy++) {
             int y = top + dy;
             if (y < 0 || y >= CHUNK_SY) continue;
             int r;
-            if      (dy <= -2) r = 2;      // lower canopy: broad
-            else if (dy <=  0) r = 2;      // mid: broadest
-            else if (dy ==  1) r = 1;      // upper: narrowing
-            else               r = 0;      // crown tip
-            float rr = (r + 0.5f) * (r + 0.5f);
+            if      (dy <= -2) r = 2;      // bottom: broad
+            else if (dy == -1) r = 3;      // lower-mid: broadest
+            else if (dy ==  0) r = 2;      // upper-mid
+            else               r = 1;      // top: narrowing
+            float rr = (r + 0.4f) * (r + 0.4f);
             for (int dx = -r; dx <= r; dx++)
             for (int dz = -r; dz <= r; dz++) {
                 if (dx*dx + dz*dz > rr) continue;          // round the corners
                 int x = lx + dx, z = lz + dz;
                 if (x < 0 || x >= CHUNK_SX || z < 0 || z >= CHUNK_SZ) continue;
-                // don't overwrite the trunk core (keeps the trunk visible)
-                if (dx == 0 && dz == 0 && y <= top) continue;
+                if (dx == 0 && dz == 0 && y <= top) continue;  // keep trunk visible
                 if (c.get(x, y, z) == BLOCK_AIR) c.set(x, y, z, BLOCK_LEAVES);
             }
         }
-        // a single leaf cap on the very top for a pointed crown
-        if (top + (hi) + 1 < CHUNK_SY && c.get(lx, top + hi + 1, lz) == BLOCK_AIR)
-            c.set(lx, top + hi + 1, lz, BLOCK_LEAVES);
+        // pointed leaf crown (2 caps) so the top isn't a flat disc
+        for (int k = 1; k <= 2; k++)
+            if (top + hi + k < CHUNK_SY && c.get(lx, top + hi + k, lz) == BLOCK_AIR)
+                c.set(lx, top + hi + k, lz, BLOCK_LEAVES);
     }
 };
 

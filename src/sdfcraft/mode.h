@@ -218,12 +218,27 @@ private:
         BlockId center = world.get_block(last_hit_.bx, last_hit_.by, last_hit_.bz);
         if (center == BLOCK_AIR || center == BLOCK_BEDROCK) return;
 
-        // --- smooth spherical carve (MassRTS sdf_terrain style) ---
+        const ItemDef& tool = item_def(inv.held().id);
+
+        // --- object blocks (trees / planks / placed blocks) are NOT part of the
+        // smooth SDF terrain field, so carve_sphere can't touch them. Mine them
+        // as discrete blocks: remove the hit block and drop it. This is what
+        // makes trees choppable (and any built structure breakable). ---
+        if (!block_is_terrain(center)) {
+            uint8_t need = block_min_tier(center);
+            bool right_tool = (block_pref_tool(center) == ToolKind::None) ||
+                              (tool.tool == block_pref_tool(center));
+            ops_->setBlock(last_hit_.bx, last_hit_.by, last_hit_.bz, BLOCK_AIR);
+            if (!(need > 0 && (!right_tool || tool.tier < need)))
+                inv.add(block_item(center), 1, item_max_stack(block_item(center)));
+            return;
+        }
+
+        // --- smooth spherical carve (MassRTS sdf_terrain style) for terrain ---
         // Modify the continuous SDF field with a smooth-min sphere centred on the
         // precise ray contact point. Marching Cubes then meshes a rounded bowl
         // (no stair-stepping), and carve_sphere reports which blocks flipped to
         // air so we can award drops with the usual tool-tier gate.
-        const ItemDef& tool = item_def(inv.held().id);
         glm::vec3 hp = last_hit_.point;
         std::vector<std::array<int,4>> flips;
         // Route through the replication seam (local apply + prediction; the

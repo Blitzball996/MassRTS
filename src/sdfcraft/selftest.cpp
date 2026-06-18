@@ -2,6 +2,8 @@
 #include "sdfcraft/crafting.h"
 #include "sdfcraft/world.h"
 #include "sdfcraft/planet.h"
+#include "sdfcraft/planet_mesh.h"
+#include <algorithm>
 #include <cstdio>
 #include <cassert>
 using namespace sdfcraft;
@@ -82,6 +84,22 @@ int main() {
         CHECK(root.child[0]->level==1);
         free_quad(&root);
         CHECK(!root.has_children);
+    }
+
+    // --- planet mesh LOD build (Phase P1) ---
+    {
+        PlanetMesh pm;
+        // camera just above the surface -> high detail under camera, low elsewhere
+        dvec3 cam = dvec3(1,0,0) * (pm.cfg.radius_m + 50.0);
+        pm.update_lod(cam);
+        std::vector<PlanetVertex> verts;
+        pm.build(cam, verts, 4);
+        CHECK(!verts.empty());            // produced geometry
+        CHECK(verts.size() % 3 == 0);     // whole triangles
+        // vertices right under the camera should be small (floating origin works)
+        float minlen = 1e30f;
+        for (auto& v : verts) minlen = std::min(minlen, glm::length(v.pos));
+        CHECK(minlen < 1000.0f);          // nearest patch within ~1km of camera
     }
 
     if (fails == 0) printf("ALL SDFCRAFT TESTS PASSED\n");

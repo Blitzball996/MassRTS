@@ -21,6 +21,8 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
+#include <vector>
+#include <array>
 
 namespace sdfcraft {
 
@@ -113,6 +115,7 @@ private:
     ChunkRenderer renderer_;
     RayHit last_hit_;
     float  dig_cooldown_ = 0.0f;
+    float  dig_radius_ = 1.8f;   // smooth spherical carve radius (blocks), MassRTS-style
 
     void spawn_player() {
         int h = world.surface_height(0, 0);
@@ -165,19 +168,30 @@ private:
     }
 
     void do_dig() {
-        BlockId b = world.get_block(last_hit_.bx, last_hit_.by, last_hit_.bz);
-        if (b == BLOCK_AIR || b == BLOCK_BEDROCK) return;
-        world.set_block(last_hit_.bx, last_hit_.by, last_hit_.bz, BLOCK_AIR);
-        // tier gate: ores/stone drop nothing without a strong enough tool
+        BlockId center = world.get_block(last_hit_.bx, last_hit_.by, last_hit_.bz);
+        if (center == BLOCK_AIR || center == BLOCK_BEDROCK) return;
+
+        // --- smooth spherical carve (MassRTS sdf_terrain style) ---
+        // Modify the continuous SDF field with a smooth-min sphere centred on the
+        // precise ray contact point. Marching Cubes then meshes a rounded bowl
+        // (no stair-stepping), and carve_sphere reports which blocks flipped to
+        // air so we can award drops with the usual tool-tier gate.
         const ItemDef& tool = item_def(inv.held().id);
-        uint8_t need = block_min_tier(b);
-        bool right_tool = (block_pref_tool(b) == ToolKind::None) ||
-                          (tool.tool == block_pref_tool(b));
-        if (need > 0 && (!right_tool || tool.tier < need)) return; // no drop
-        BlockId drop = (b == BLOCK_STONE) ? BLOCK_COBBLE
-                     : (b == BLOCK_GRASS) ? BLOCK_DIRT
-                     : b;
-        inv.add(block_item(drop), 1, item_max_stack(block_item(drop)));
+        glm::vec3 hp = last_hit_.point;
+        std::vector<std::array<int,4>> flips;
+        world.carve_sphere(hp.x, hp.y, hp.z, dig_radius_, -1, &flips);
+
+        for (auto& f : flips) {
+            BlockId b = (BlockId)f[3];
+            uint8_t need = block_min_tier(b);
+            bool right_tool = (block_pref_tool(b) == ToolKind::None) ||
+                              (tool.tool == block_pref_tool(b));
+            if (need > 0 && (!right_tool || tool.tier < need)) continue; // no drop
+            BlockId drop = (b == BLOCK_STONE) ? BLOCK_COBBLE
+                         : (b == BLOCK_GRASS) ? BLOCK_DIRT
+                         : b;
+            inv.add(block_item(drop), 1, item_max_stack(block_item(drop)));
+        }
     }
 
     // Dig cooldown scaled by tool match (faster with the right tool/tier).

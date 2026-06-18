@@ -19,6 +19,7 @@ struct RayHit {
     int    bx=0, by=0, bz=0;     // block that was hit
     int    nx=0, ny=0, nz=0;     // face normal (points to the empty side)
     float  dist = 0.0f;
+    glm::vec3 point{0,0,0};      // precise world-space contact point
 };
 
 class Player {
@@ -155,35 +156,53 @@ public:
         }
     }
 
-    // Voxel DDA: walk the grid from the eye along `dir` up to max_dist.
+    // SDF sphere-trace: march the *continuous* terrain field the renderer
+    // actually draws, so "what you see is what you carve". The old version
+    // walked the discrete block grid (DDA), but the visible surface is the
+    // smooth SDF isosurface at a fractional height — the two disagreed, so the
+    // carve sphere landed beside the surface and digging hit empty air. Marching
+    // sample_sdf fixes that: we stop at the zero-crossing, place the carve there,
+    // and derive the block coord/face from the surface normal for selection,
+    // placement and the hardness lookup.
     RayHit raycast(World& world, float max_dist = 6.0f) {
         glm::vec3 o = eye(), d = forward();
         RayHit r;
-        int x = (int)floorf(o.x), y = (int)floorf(o.y), z = (int)floorf(o.z);
-        int sx = d.x > 0 ? 1 : -1, sy = d.y > 0 ? 1 : -1, sz = d.z > 0 ? 1 : -1;
-        float inv_x = d.x != 0 ? fabsf(1.0f/d.x) : 1e30f;
-        float inv_y = d.y != 0 ? fabsf(1.0f/d.y) : 1e30f;
-        float inv_z = d.z != 0 ? fabsf(1.0f/d.z) : 1e30f;
-        float tx = ((sx>0 ? (x+1-o.x) : (o.x-x))) * inv_x;
-        float ty = ((sy>0 ? (y+1-o.y) : (o.y-y))) * inv_y;
-        float tz = ((sz>0 ? (z+1-o.z) : (o.z-z))) * inv_z;
         float t = 0.0f;
-        int face = -1;
-        while (t <= max_dist) {
-            BlockId b = world.get_block(x, y, z);
-            if (b != BLOCK_AIR && !block_is_liquid(b)) {
-                r.hit = true; r.bx = x; r.by = y; r.bz = z; r.dist = t;
-                switch (face) {
-                    case 0: r.nx = -sx; break;
-                    case 1: r.ny = -sy; break;
-                    case 2: r.nz = -sz; break;
-                    default: r.ny = 1; break; // started inside; arbitrary
+        float prev = world.sample_sdf(o.x, o.y, o.z);
+        // If we start inside solid (prev<0) the first sample already crossed.
+        const float step = 0.10f;     // fine march keeps the contact crisp
+        for (int i = 0; i < (int)(max_dist / step) + 1 && t <= max_dist; i++) {
+            float nt = t + step;
+            glm::vec3 p = o + d * nt;
+            float s = world.sample_sdf(p.x, p.y, p.z);
+            if (s < 0.0f) {
+                // crossed the surface between t and nt: refine by bisection
+                float lo = t, hi = nt;
+                for (int b = 0; b < 12; b++) {
+                    float mid = 0.5f * (lo + hi);
+                    glm::vec3 pm = o + d * mid;
+                    if (world.sample_sdf(pm.x, pm.y, pm.z) < 0.0f) hi = mid; else lo = mid;
                 }
+                glm::vec3 hitp = o + d * hi;
+                glm::vec3 nrm  = world.sdf_normal(hitp);   // points toward air
+                r.hit = true;
+                r.dist = hi;
+                r.point = hitp;
+                // Block coord = the solid voxel just inside the surface.
+                glm::vec3 inside = hitp - nrm * 0.5f;
+                r.bx = (int)std::floor(inside.x);
+                r.by = (int)std::floor(inside.y);
+                r.bz = (int)std::floor(inside.z);
+                // Face normal: dominant axis of the surface normal (for placing).
+                if (fabsf(nrm.x) >= fabsf(nrm.y) && fabsf(nrm.x) >= fabsf(nrm.z))
+                    r.nx = nrm.x > 0 ? 1 : -1;
+                else if (fabsf(nrm.y) >= fabsf(nrm.z))
+                    r.ny = nrm.y > 0 ? 1 : -1;
+                else
+                    r.nz = nrm.z > 0 ? 1 : -1;
                 return r;
             }
-            if (tx < ty && tx < tz)      { x += sx; t = tx; tx += inv_x; face = 0; }
-            else if (ty < tz)            { y += sy; t = ty; ty += inv_y; face = 1; }
-            else                         { z += sz; t = tz; tz += inv_z; face = 2; }
+            prev = s; t = nt;
         }
         return r;
     }

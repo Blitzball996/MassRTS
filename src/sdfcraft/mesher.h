@@ -35,12 +35,20 @@ public:
         for (int lx = 0; lx < CHUNK_SX; lx++) {
             BlockId b = c.get(lx, ly, lz);
             if (b == BLOCK_AIR) continue;
+            // Natural terrain is drawn by the smooth Marching-Cubes surface;
+            // skip it here so we don't z-fight that surface with cubes. Only
+            // "object" blocks (logs/leaves/planks/glass/placed blocks/water)
+            // are emitted as discrete cubes — that keeps trees crisply blocky.
+            if (block_is_terrain(b)) continue;
             int wx = base_x + lx, wy = ly, wz = base_z + lz;
             const BlockDef& def = block_def(b);
             std::vector<float>& dst = (def.opaque) ? out.opaque : out.transparent;
 
             // For each of 6 directions, draw face if neighbour is non-opaque
-            // (and not the same liquid, to avoid internal water faces).
+            // (and not the same liquid, to avoid internal water faces). A face
+            // bordering terrain is still drawn (terrain is the smooth surface,
+            // not a cube neighbour), so tree trunks sitting in the ground keep
+            // their sides.
             static const int dirs[6][3] = {
                 {+1,0,0},{-1,0,0},{0,+1,0},{0,-1,0},{0,0,+1},{0,0,-1}
             };
@@ -48,13 +56,14 @@ public:
                 int nx = wx + dirs[d][0], ny = wy + dirs[d][1], nz = wz + dirs[d][2];
                 BlockId nb = neighbor(world, c, lx + dirs[d][0], ly + dirs[d][1], lz + dirs[d][2], nx, ny, nz);
                 bool draw;
-                if (def.liquid) draw = (nb == BLOCK_AIR); // water: only top/exposed
-                else            draw = !block_is_opaque(nb) && nb != b;
+                if (def.liquid)            draw = (nb == BLOCK_AIR); // water: only exposed
+                else if (block_is_terrain(nb)) draw = true;          // expose against smooth ground
+                else                       draw = !block_is_opaque(nb) && nb != b;
                 if (!draw) continue;
                 glm::vec3 col = (dirs[d][1] > 0) ? def.top_color : def.color;
                 // simple directional shade so cubes read as 3D
                 float shade = face_shade(d);
-                emit_face(dst, glm::vec3((float)wx, (float)wy, (float)wz), d, col * shade);
+                emit_face(dst, glm::vec3((float)wx, (float)wy, (float)wz), d, col * shade, block_material(b));
             }
         }
     }
@@ -76,14 +85,15 @@ private:
         return world.get_block(wx, wy, wz); // cross-chunk
     }
 
-    static void push_vert(std::vector<float>& v, glm::vec3 p, glm::vec3 n, glm::vec3 col) {
+    static void push_vert(std::vector<float>& v, glm::vec3 p, glm::vec3 n, glm::vec3 col, float mat) {
         v.push_back(p.x); v.push_back(p.y); v.push_back(p.z);
         v.push_back(n.x); v.push_back(n.y); v.push_back(n.z);
         v.push_back(col.r); v.push_back(col.g); v.push_back(col.b);
+        v.push_back(mat);
     }
 
     // Emit one cube face (2 triangles) at integer block origin `o`.
-    static void emit_face(std::vector<float>& v, glm::vec3 o, int d, glm::vec3 col) {
+    static void emit_face(std::vector<float>& v, glm::vec3 o, int d, glm::vec3 col, float mat) {
         // 8 cube corners (block occupies [o, o+1])
         glm::vec3 p000 = o + glm::vec3(0,0,0), p100 = o + glm::vec3(1,0,0);
         glm::vec3 p010 = o + glm::vec3(0,1,0), p110 = o + glm::vec3(1,1,0);
@@ -98,8 +108,8 @@ private:
             case 4: n={0,0,1};  a=p101;b2=p001;c2=p011;dd=p111; break; // +Z
             default:n={0,0,-1}; a=p000;b2=p100;c2=p110;dd=p010; break; // -Z
         }
-        push_vert(v, a, n, col); push_vert(v, b2, n, col); push_vert(v, c2, n, col);
-        push_vert(v, a, n, col); push_vert(v, c2, n, col); push_vert(v, dd, n, col);
+        push_vert(v, a, n, col, mat); push_vert(v, b2, n, col, mat); push_vert(v, c2, n, col, mat);
+        push_vert(v, a, n, col, mat); push_vert(v, c2, n, col, mat); push_vert(v, dd, n, col, mat);
     }
 };
 

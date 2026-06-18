@@ -59,7 +59,7 @@ inline const BlockDef& block_def(BlockId id) {
         /* SAND     */ {"sand",     {0.80f,0.74f,0.50f},{0.80f,0.74f,0.50f},0.5f,  true,  true,  false},
         /* WATER    */ {"water",    {0.15f,0.35f,0.65f},{0.15f,0.35f,0.65f},-1.0f, false, false, true },
         /* LOG      */ {"log",      {0.42f,0.30f,0.16f},{0.55f,0.42f,0.24f},2.0f,  true,  true,  false},
-        /* LEAVES   */ {"leaves",   {0.22f,0.42f,0.18f},{0.22f,0.42f,0.18f},0.2f,  true,  false, false},
+        /* LEAVES   */ {"leaves",   {0.18f,0.40f,0.14f},{0.22f,0.46f,0.18f},0.2f,  true,  true,  false},
         /* PLANK    */ {"plank",    {0.62f,0.46f,0.28f},{0.62f,0.46f,0.28f},2.0f,  true,  true,  false},
         /* COBBLE   */ {"cobble",   {0.42f,0.42f,0.44f},{0.42f,0.42f,0.44f},2.0f,  true,  true,  false},
         /* GLASS    */ {"glass",    {0.75f,0.85f,0.92f},{0.75f,0.85f,0.92f},0.3f,  true,  false, false},
@@ -82,5 +82,62 @@ inline bool block_is_air(BlockId id)    { return id == BLOCK_AIR; }
 inline bool block_is_solid(BlockId id)  { return block_def(id).solid; }
 inline bool block_is_opaque(BlockId id) { return block_def(id).opaque; }
 inline bool block_is_liquid(BlockId id) { return block_def(id).liquid; }
+
+// "Terrain" = the natural ground body that the smooth Marching-Cubes SDF
+// isosurface represents (stone/dirt/grass/sand/snow/gravel/ore/bedrock). These
+// must NOT be re-meshed as cubes or they z-fight the smooth surface. Everything
+// else (logs, leaves, planks, glass, placed blocks, furniture, water) is an
+// "object" drawn as discrete cubes by the block mesher — this is what keeps
+// trees nicely blocky on top of the smooth land.
+inline bool block_is_terrain(BlockId id) {
+    switch (id) {
+        case BLOCK_STONE: case BLOCK_DIRT: case BLOCK_GRASS:
+        case BLOCK_SAND:  case BLOCK_SNOW: case BLOCK_GRAVEL:
+        case BLOCK_COAL_ORE: case BLOCK_IRON_ORE:
+        case BLOCK_GOLD_ORE: case BLOCK_DIAMOND_ORE:
+        case BLOCK_BEDROCK:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Material class fed to the shader (1 float per vertex). Drives which MassRTS
+// terrain.frag palette the fragment shader runs: grass/dirt/rock layered noise
+// instead of a flat tint. Keep these codes in sync with sdfcraft_chunk.frag.
+enum : int {
+    MAT_GENERIC = 0,  // use the vertex colour directly (furnace, torch, glass...)
+    MAT_GRASS   = 1,
+    MAT_DIRT    = 2,
+    MAT_ROCK    = 3,  // stone / cobble
+    MAT_SAND    = 4,
+    MAT_SNOW    = 5,
+    MAT_WOOD    = 6,  // log / plank
+    MAT_LEAVES  = 7,
+    MAT_ORE     = 8,  // rock base + ore speckle tinted by vertex colour
+    MAT_WATER   = 9,
+    MAT_GRAVEL  = 10
+};
+
+inline float block_material(BlockId id) {
+    switch (id) {
+        case BLOCK_GRASS:       return (float)MAT_GRASS;
+        case BLOCK_DIRT:        return (float)MAT_DIRT;
+        case BLOCK_STONE:
+        case BLOCK_COBBLE:      return (float)MAT_ROCK;
+        case BLOCK_SAND:        return (float)MAT_SAND;
+        case BLOCK_SNOW:        return (float)MAT_SNOW;
+        case BLOCK_LOG:
+        case BLOCK_PLANK:       return (float)MAT_WOOD;
+        case BLOCK_LEAVES:      return (float)MAT_LEAVES;
+        case BLOCK_COAL_ORE:
+        case BLOCK_IRON_ORE:
+        case BLOCK_GOLD_ORE:
+        case BLOCK_DIAMOND_ORE: return (float)MAT_ORE;
+        case BLOCK_WATER:       return (float)MAT_WATER;
+        case BLOCK_GRAVEL:      return (float)MAT_GRAVEL;
+        default:                return (float)MAT_GENERIC;
+    }
+}
 
 } // namespace sdfcraft

@@ -44,12 +44,16 @@ public:
         for (auto& kv : world.chunks()) {
             Chunk& c = kv.second;
             if (!c.dirty_mesh) continue;
-            // Opaque terrain → smooth Marching-Cubes isosurface (true SDF look).
-            // Non-opaque blocks (water/glass/leaves) → blocky faces.
+            // Natural terrain → smooth Marching-Cubes isosurface (true SDF look).
+            // Object blocks (logs/leaves/planks/glass/placed) → discrete cubes.
             ChunkMesh m;
-            MCMesher::build(world, c, m);   // fills m.opaque
+            MCMesher::build(world, c, m);   // fills m.opaque (smooth ground)
             ChunkMesh cube;
-            Mesher::build(world, c, cube);  // fills cube.opaque + cube.transparent
+            Mesher::build(world, c, cube);  // fills cube.opaque (trees/objects) + cube.transparent
+            // Merge the cube objects' opaque faces into the terrain opaque buffer
+            // so trees actually render — previously cube.opaque was dropped and
+            // trunks/leaves never drew.
+            m.opaque.insert(m.opaque.end(), cube.opaque.begin(), cube.opaque.end());
             m.transparent = std::move(cube.transparent);
             upload(c.key, m);
             c.dirty_mesh = false;
@@ -124,18 +128,19 @@ private:
         glBindVertexArray(vao);
         glBindBuffer(GL_ARRAY_BUFFER, vbo);
         glBufferData(GL_ARRAY_BUFFER, data.size()*sizeof(float), data.data(), GL_DYNAMIC_DRAW);
-        GLsizei stride = 9 * sizeof(float);
+        GLsizei stride = 10 * sizeof(float);
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);                  glEnableVertexAttribArray(0);
         glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3*sizeof(float)));  glEnableVertexAttribArray(1);
         glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, stride, (void*)(6*sizeof(float)));  glEnableVertexAttribArray(2);
+        glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, (void*)(9*sizeof(float)));  glEnableVertexAttribArray(3);
         glBindVertexArray(0);
     }
 
     void upload(ChunkKey k, const ChunkMesh& m) {
         Gpu& g = gpu_[k];
-        if (!m.opaque.empty()) { make_buffer(g.opaque_vao, g.opaque_vbo, m.opaque); g.opaque_count = (GLsizei)(m.opaque.size()/9); }
+        if (!m.opaque.empty()) { make_buffer(g.opaque_vao, g.opaque_vbo, m.opaque); g.opaque_count = (GLsizei)(m.opaque.size()/10); }
         else g.opaque_count = 0;
-        if (!m.transparent.empty()) { make_buffer(g.trans_vao, g.trans_vbo, m.transparent); g.trans_count = (GLsizei)(m.transparent.size()/9); }
+        if (!m.transparent.empty()) { make_buffer(g.trans_vao, g.trans_vbo, m.transparent); g.trans_count = (GLsizei)(m.transparent.size()/10); }
         else g.trans_count = 0;
     }
 

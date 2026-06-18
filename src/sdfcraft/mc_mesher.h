@@ -7,7 +7,7 @@
 // The isosurface (isovalue = 0) falls exactly at block boundaries, but
 // neighbour trilinear interpolation gives smooth normals + rounded edges.
 //
-// Vertex format: 9 floats (px py pz  nx ny nz  r g b) — same as cube mesher.
+// Vertex format: 10 floats (px py pz  nx ny nz  r g b  mat) — same as cube mesher.
 // Only emits opaque geometry into ChunkMesh::opaque; non-opaque blocks
 // (water/glass/leaves) stay in the cube mesher's transparent pass.
 // =============================================================================
@@ -333,17 +333,16 @@ static const int MC_EDGE_CORNERS[12][2] = {
 
 class MCMesher {
 public:
-    // SDF sample: negative inside solid, positive in air. +/-0.5 step field.
+    // Continuous SDF sample: negative inside solid, positive in air. Reads the
+    // world's analytic + carved float field so the isosurface is smooth (no
+    // ±0.5 stair-stepping). Leaves/foliage are excluded from this surface — they
+    // are handled by the separate transparent pass.
     static float sample(World& w, int wx, int wy, int wz) {
-        if (wy < 0) return -0.5f;            // bedrock floor below world
-        if (wy >= CHUNK_SY) return 0.5f;     // air above
-        BlockId b = w.get_block(wx, wy, wz);
-        if (b == BLOCK_AIR) return 0.5f;
-        return block_def(b).opaque ? -0.5f : 0.5f; // only opaque solids form the surface
+        return w.sdf_at_cached(wx, wy, wz);
     }
 
-    // Albedo of the nearest solid corner (for vertex color).
-    static glm::vec3 solid_color(World& w, int wx, int wy, int wz, bool top) {
+    // Albedo + material class of the nearest solid corner (for vertex color).
+    static glm::vec3 solid_color(World& w, int wx, int wy, int wz, bool top, float& mat_out) {
         if (wy < 0 || wy >= CHUNK_SY) wy = glm::clamp(wy, 0, CHUNK_SY - 1);
         BlockId b = w.get_block(wx, wy, wz);
         if (b == BLOCK_AIR || !block_def(b).opaque) {
@@ -351,14 +350,18 @@ public:
             BlockId d = w.get_block(wx, glm::max(wy - 1, 0), wz);
             if (d != BLOCK_AIR && block_def(d).opaque) b = d;
         }
-        if (b == BLOCK_AIR) return glm::vec3(0.45f, 0.42f, 0.38f);
+        if (b == BLOCK_AIR) { mat_out = (float)MAT_DIRT; return glm::vec3(0.45f, 0.42f, 0.38f); }
         const BlockDef& def = block_def(b);
+        mat_out = block_material(b);
         return top ? def.top_color : def.color;
     }
 
     static void build(World& world, Chunk& c, ChunkMesh& out) {
         const int base_x = c.key.cx * CHUNK_SX;
         const int base_z = c.key.cz * CHUNK_SZ;
+
+        // Prime the height cache for this chunk column so analytic_field is O(1) per voxel.
+        world.prime_height_cache(base_x - 1, base_z - 1, CHUNK_SX + 3, CHUNK_SZ + 3);
 
         // Iterate cells; sample one extra cell on +X/+Z to seal chunk borders.
         for (int ly = -1; ly < CHUNK_SY; ly++)
@@ -398,17 +401,14 @@ public:
     }
 
 private:
-    // Gradient of the SDF via central differences → smooth normal.
+    // Smooth normal from the trilinear-sampled SDF (MassRTS sdf_gradient). Using
+    // a sub-voxel 0.5-step gradient on the *interpolated* field — instead of
+    // integer central differences — removes the faceted/blocky shading and gives
+    // the rounded surface the same smoothness as the analytic terrain.
     static glm::vec3 grad_normal(World& w, glm::vec3 p) {
-        int x = (int)std::floor(p.x), y = (int)std::floor(p.y), z = (int)std::floor(p.z);
-        float dx = sample(w, x + 1, y, z) - sample(w, x - 1, y, z);
-        float dy = sample(w, x, y + 1, z) - sample(w, x, y - 1, z);
-        float dz = sample(w, x, y, z + 1) - sample(w, x, y, z - 1);
-        glm::vec3 g(dx, dy, dz);
-        float len = glm::length(g);
-        if (len < 1e-5f) return glm::vec3(0, 1, 0);
-        // SDF positive=air, so surface normal points along +gradient (toward air).
-        return g / len;
+        // sdf_normal returns the unit gradient; SDF positive=air so it already
+        // points toward air (outward surface normal).
+        return w.sdf_normal(p);
     }
 
     static void emit_tri(World& w, std::vector<float>& dst,
@@ -428,10 +428,12 @@ private:
         int sx = (int)std::floor(inside.x);
         int sy = (int)std::floor(inside.y);
         int sz = (int)std::floor(inside.z);
-        glm::vec3 col = solid_color(w, sx, sy, sz, top);
+        float mat = 0.0f;
+        glm::vec3 col = solid_color(w, sx, sy, sz, top, mat);
         dst.push_back(p.x); dst.push_back(p.y); dst.push_back(p.z);
         dst.push_back(n.x); dst.push_back(n.y); dst.push_back(n.z);
         dst.push_back(col.r); dst.push_back(col.g); dst.push_back(col.b);
+        dst.push_back(mat);
     }
 };
 

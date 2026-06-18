@@ -188,6 +188,18 @@ add_custom_command(TARGET SDFCraft POST_BUILD
     $<TARGET_FILE_DIR:SDFCraft>/shaders
 )
 
+# === PlanetViewer (Phase P1: fly around a real-scale 6371km planet) ===
+add_executable(PlanetViewer src/main_planet.cpp)
+target_include_directories(PlanetViewer PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${glad_SOURCE_DIR}/include
+)
+target_link_libraries(PlanetViewer PRIVATE OpenGL::GL glfw glad glm::glm)
+if(WIN32)
+    target_link_libraries(PlanetViewer PRIVATE ws2_32)
+endif()
+
+
 # === SDFCraft headless logic test (no GL) ===
 add_executable(test_sdfcraft src/sdfcraft/selftest.cpp)
 target_include_directories(test_sdfcraft PRIVATE ${CMAKE_SOURCE_DIR}/src)

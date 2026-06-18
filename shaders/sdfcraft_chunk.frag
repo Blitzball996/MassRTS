@@ -30,6 +30,30 @@ float warped_fbm(vec2 p) {
     return fbm3(p + q * 2.0);
 }
 
+// === Triplanar sampling weights ===
+// Projecting all detail onto the XZ plane stretches it into streaks on steep
+// faces and vertical walls — that's the "unnatural faceted polygon" look. With
+// a real 3D surface (SDF / Marching Cubes) we must blend three planar samples
+// (YZ, XZ, XY) weighted by the surface normal so cliffs and dug-out walls stay
+// just as crisp as flat ground. `tri_w` returns the per-axis blend weights.
+vec3 tri_w(vec3 n) {
+    vec3 w = pow(abs(n), vec3(4.0));     // sharpen so the dominant axis wins
+    return w / max(w.x + w.y + w.z, 1e-5);
+}
+// Triplanar 2D-noise: sample the same fbm on the three world planes and blend.
+float tri_noise(vec3 p, vec3 w, float freq) {
+    float nx = noise(p.yz * freq);
+    float ny = noise(p.xz * freq);
+    float nz = noise(p.xy * freq);
+    return nx * w.x + ny * w.y + nz * w.z;
+}
+float tri_warped(vec3 p, vec3 w, float freq) {
+    float nx = warped_fbm(p.yz * freq);
+    float ny = warped_fbm(p.xz * freq);
+    float nz = warped_fbm(p.xy * freq);
+    return nx * w.x + ny * w.y + nz * w.z;
+}
+
 // Continuous terrain colouring (MassRTS terrain.frag style).
 // Instead of hard per-block material zones (which cut grass/dirt along voxel
 // edges and read as jaggies), we drive the whole surface from CONTINUOUS
@@ -38,50 +62,56 @@ float warped_fbm(vec2 p) {
 // only consulted for things that are genuinely a distinct material (wood,
 // leaves, water, ore, sand, snow); everything earthy is the continuous blend.
 vec3 terrain_surface(vec2 wpos, float slope, vec3 n) {
+    vec3 P = v_world;          // full 3D position for triplanar
+    vec3 W = tri_w(n);         // triplanar blend weights
     // --- grass (default flat ground) ---
-    vec3 grass_lush = vec3(0.18,0.38,0.08), grass_med = vec3(0.22,0.45,0.12);
-    vec3 grass_dry  = vec3(0.40,0.42,0.15), grass_dark= vec3(0.10,0.25,0.05);
-    float pattern = warped_fbm(wpos*0.004);
-    float variety = noise(wpos*0.015);
+    vec3 grass_lush = vec3(0.20,0.42,0.09), grass_med = vec3(0.26,0.50,0.14);
+    vec3 grass_dry  = vec3(0.42,0.45,0.16), grass_dark= vec3(0.11,0.27,0.06);
+    float pattern = tri_warped(P, W, 0.004);
+    float variety = tri_noise(P, W, 0.015);
     vec3 grass = mix(grass_lush, grass_med, pattern);
-    grass = mix(grass, grass_dry,  smoothstep(0.55,0.75,variety)*0.5);
-    grass = mix(grass, grass_dark, smoothstep(0.3,0.0,variety)*0.3);
-    float flowers = noise(wpos*0.06)*noise(wpos*0.2);
+    grass = mix(grass, grass_dry,  smoothstep(0.55,0.75,variety)*0.45);
+    grass = mix(grass, grass_dark, smoothstep(0.3,0.0,variety)*0.30);
+    // crisp blade-scale micro detail (was missing — adds "clarity")
+    float blades = tri_noise(P, W, 1.6);
+    grass *= 0.90 + blades*0.18;
+    float flowers = tri_noise(P, W, 0.06) * tri_noise(P, W, 0.2);
     if (flowers > 0.55) {
-        float hue = noise(wpos*0.3);
-        vec3 fc = mix(vec3(0.7,0.6,0.1), vec3(0.5,0.2,0.5), hue);
-        grass = mix(grass, fc, (flowers-0.55)*3.0*0.15);
+        float hue = tri_noise(P, W, 0.3);
+        vec3 fc = mix(vec3(0.75,0.62,0.12), vec3(0.55,0.22,0.52), hue);
+        grass = mix(grass, fc, (flowers-0.55)*3.0*0.18);
     }
-    grass += vec3(0.0, noise(wpos*2.0)*0.08, 0.0);
 
     // --- dirt (moderate slopes / shallow subsurface) ---
-    vec3 dirt_a=vec3(0.34,0.29,0.24), dirt_b=vec3(0.26,0.23,0.20);
-    float clods = warped_fbm(wpos*0.05 + v_world.y*0.1);
+    vec3 dirt_a=vec3(0.36,0.27,0.19), dirt_b=vec3(0.26,0.20,0.14);
+    float clods = tri_warped(P, W, 0.05);
     vec3 dirt = mix(dirt_a, dirt_b, clods);
-    float peb = noise(wpos*0.6 + vec2(v_world.y));
-    dirt = mix(dirt, vec3(0.20,0.18,0.16), smoothstep(0.6,0.8,peb)*0.4);
+    float peb = tri_noise(P, W, 0.6);
+    dirt = mix(dirt, vec3(0.20,0.16,0.12), smoothstep(0.6,0.8,peb)*0.4);
+    dirt *= 0.92 + tri_noise(P, W, 2.5)*0.14;   // grainy clarity
 
     // --- rock (steep faces / deep subsurface) with CONTINUOUS strata ---
     // Depth-banded sedimentary layers so a dug-out cross-section reads as rich
-    // geology instead of flat grey. Bands are driven by world height with soft
-    // smoothstep edges (no hard seams) and slowly wander via low-freq noise.
-    vec3 rock_top   = vec3(0.46,0.44,0.42); // near-surface pale rock
-    vec3 rock_mid   = vec3(0.34,0.33,0.34); // mid grey granite
-    vec3 rock_deep  = vec3(0.30,0.27,0.24); // warm deep stone
-    vec3 rock_base  = vec3(0.24,0.22,0.26); // cold basement rock
-    float wob = noise(wpos*0.02) * 6.0;       // layer boundaries undulate
+    // geology instead of flat grey. Strata follow world height (horizontal beds)
+    // while surface detail is triplanar so vertical walls stay crisp.
+    vec3 rock_top   = vec3(0.48,0.46,0.43); // near-surface pale rock
+    vec3 rock_mid   = vec3(0.36,0.35,0.36); // mid grey granite
+    vec3 rock_deep  = vec3(0.32,0.28,0.24); // warm deep stone
+    vec3 rock_base  = vec3(0.25,0.23,0.28); // cold basement rock
+    float wob = tri_noise(P, W, 0.02) * 6.0;  // layer boundaries undulate
     float y   = v_world.y + wob;
     vec3 rock = rock_top;
     rock = mix(rock, rock_mid,  smoothstep(48.0, 30.0, y));
     rock = mix(rock, rock_deep, smoothstep(28.0, 14.0, y));
     rock = mix(rock, rock_base, smoothstep(12.0,  2.0, y));
-    // fine strata striping within the bands
-    float strata = sin(y*0.8 + noise(wpos*0.06)*3.0)*0.5 + 0.5;
-    rock = mix(rock, rock*1.18, smoothstep(0.55,0.9,strata)*0.5);
-    float rough = warped_fbm(wpos*0.04 + y*0.05);
-    rock = mix(rock*0.9, rock*1.1, rough);
-    float vein = smoothstep(0.82,0.93, noise(wpos*0.3 + y*0.2));
-    rock = mix(rock, vec3(0.58,0.55,0.50), vein*0.3);
+    // fine horizontal strata striping within the bands
+    float strata = sin(y*0.8 + tri_noise(P, W, 0.06)*3.0)*0.5 + 0.5;
+    rock = mix(rock, rock*1.20, smoothstep(0.55,0.9,strata)*0.5);
+    float rough = tri_warped(P, W, 0.04);
+    rock = mix(rock*0.88, rock*1.12, rough);
+    rock *= 0.92 + tri_noise(P, W, 1.8)*0.16;   // crisp rock grain
+    float vein = smoothstep(0.82,0.93, tri_noise(P, W, 0.3));
+    rock = mix(rock, vec3(0.60,0.57,0.50), vein*0.3);
 
     // Continuous slope + depth blend: grass -> dirt -> rock. Grass dominates
     // near-flat ground at the surface. As you dig down, the dirt shell is thin

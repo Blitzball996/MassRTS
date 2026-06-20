@@ -95,6 +95,25 @@ public:
 
     glm::vec3 eye() const { return pos + glm::vec3(0, EYE, 0); }
 
+    // Render-time eye: same as eye() horizontally, but the vertical component is
+    // smoothed. Step-ups and landing snap pos.y by up to ~1 block in a single
+    // frame, which makes the camera visibly judder when walking uphill. We ease
+    // the rendered height toward the true height so slopes/stairs feel smooth
+    // while collision/physics still use the exact pos.
+    glm::vec3 render_eye() const {
+        return glm::vec3(pos.x, smooth_y_ + EYE, pos.z);
+    }
+    // Call once per frame (after update) to advance the smoothed camera height.
+    void update_camera_smoothing(float dt) {
+        float target = pos.y;
+        float diff = target - smooth_y_;
+        // Snap if far off (teleport/fall), otherwise critically-damped follow.
+        if (std::fabs(diff) > 2.0f || flying) { smooth_y_ = target; return; }
+        float rate = 16.0f;                 // higher = snappier
+        float a = 1.0f - std::exp(-rate * dt);
+        smooth_y_ += diff * a;
+    }
+
     glm::vec3 forward() const {
         float y = glm::radians(yaw), p = glm::radians(pitch);
         return glm::normalize(glm::vec3(
@@ -111,6 +130,7 @@ public:
 
     float fall_start_y = 0.0f;  // y where the current fall began
     bool  was_falling = false;
+    float smooth_y_ = 80.0f;    // eased vertical position for the camera
 
     // wish = horizontal input (x=strafe, z=forward) in [-1,1]; up = jump/fly up.
     // fly_boost multiplies fly speed (hold to cover planet-scale distances fast).
@@ -179,12 +199,43 @@ public:
         glm::vec3 o = eye(), d = forward();
         RayHit r;
         float t = 0.0f;
-        float prev = world.sample_sdf(o.x, o.y, o.z);
         // If we start inside solid (prev<0) the first sample already crossed.
-        const float step = 0.10f;     // fine march keeps the contact crisp
-        for (int i = 0; i < (int)(max_dist / step) + 1 && t <= max_dist; i++) {
+        const float step = 0.05f;     // fine march keeps the contact crisp
+        // Track the voxel we were last in so we can detect entering an object
+        // block (trees / placed blocks) and recover the face we crossed.
+        int pvx = (int)std::floor(o.x), pvy = (int)std::floor(o.y), pvz = (int)std::floor(o.z);
+        for (int i = 0; i < (int)(max_dist / step) + 2 && t <= max_dist; i++) {
             float nt = t + step;
             glm::vec3 p = o + d * nt;
+
+            // (1) Discrete object blocks (logs / leaves / planks / placed) are
+            // NOT in the smooth SDF field, so the ray would pass straight
+            // through them. March the voxel grid in parallel and stop on the
+            // first solid non-terrain block we step into — this is what makes
+            // trees selectable / breakable.
+            int vx = (int)std::floor(p.x), vy = (int)std::floor(p.y), vz = (int)std::floor(p.z);
+            if (vx != pvx || vy != pvy || vz != pvz) {
+                BlockId b = world.get_block(vx, vy, vz);
+                if (block_is_solid(b) && !block_is_terrain(b)) {
+                    r.hit = true;
+                    r.dist = nt;
+                    r.point = p;
+                    r.bx = vx; r.by = vy; r.bz = vz;
+                    // Entry face: the air voxel we came from. Reduce to the
+                    // single dominant axis the ray crossed (largest |d|).
+                    int dx = pvx - vx, dy = pvy - vy, dz = pvz - vz;
+                    float ax = dx ? fabsf(d.x) : -1.0f;
+                    float ay = dy ? fabsf(d.y) : -1.0f;
+                    float az = dz ? fabsf(d.z) : -1.0f;
+                    if (ax >= ay && ax >= az)      { r.nx = dx; }
+                    else if (ay >= az)             { r.ny = dy; }
+                    else                           { r.nz = dz; }
+                    return r;
+                }
+            }
+            pvx = vx; pvy = vy; pvz = vz;
+
+            // (2) Smooth Marching-Cubes terrain via the continuous SDF.
             float s = world.sample_sdf(p.x, p.y, p.z);
             if (s < 0.0f) {
                 // crossed the surface between t and nt: refine by bisection
@@ -213,7 +264,7 @@ public:
                     r.nz = nrm.z > 0 ? 1 : -1;
                 return r;
             }
-            prev = s; t = nt;
+            t = nt;
         }
         return r;
     }
@@ -277,14 +328,25 @@ private:
                 glm::vec3 stepped = np;
                 stepped.y += lift;
                 if (!collides(world, stepped)) {
-                    // settle back down onto the surface so we hug the slope
-                    glm::vec3 settled = stepped;
-                    float drop = 0.0f;
-                    for (; drop < lift + 0.05f; drop += 0.05f) {
-                        glm::vec3 d = stepped; d.y -= (drop + 0.05f);
-                        if (collides(world, d)) break;
+                    // Settle back down onto the surface so we hug the slope.
+                    // Binary-search the exact contact height instead of stepping
+                    // down in coarse 0.05 increments — the old loop snapped pos.y
+                    // to a 5cm grid every frame, so walking across the smooth
+                    // (never perfectly flat) FBM ground made the height oscillate
+                    // and the camera bob. A continuous solve lands flush on the
+                    // surface and keeps pos.y stable frame to frame.
+                    float lo = 0.0f, hi = lift;     // drop amount: lo free, hi unknown
+                    glm::vec3 deepest = stepped; deepest.y -= lift;
+                    if (collides(world, deepest)) {
+                        for (int i = 0; i < 12; i++) {
+                            float mid = 0.5f * (lo + hi);
+                            glm::vec3 d = stepped; d.y -= mid;
+                            if (collides(world, d)) hi = mid; else lo = mid;
+                        }
+                    } else {
+                        lo = lift;                  // free all the way down to np
                     }
-                    settled.y -= drop;
+                    glm::vec3 settled = stepped; settled.y -= lo;
                     if (!collides(world, settled)) { pos = settled; on_ground = true; return; }
                 }
             }

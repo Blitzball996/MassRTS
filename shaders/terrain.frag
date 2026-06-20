@@ -231,6 +231,41 @@ void main() {
         base = mix(base, vec3(0.25, 0.18, 0.08), smoothstep(0.2, 0.5, slope) * 0.6);
     }
 
+    // === Subsurface strata override (carved terrain) ===
+    // biome stays the SURFACE id; depth (v_height_norm, world units below the
+    // original ground) drives the transition grass -> dirt -> rock using a
+    // CONTINUOUS channel, so no phantom-biome colour stripes appear.
+    float depth = v_height_norm;
+    if (depth > 0.5) {
+        // Dirt layer: earthy gray-brown.
+        vec3 dirt_a = vec3(0.34, 0.29, 0.24);
+        vec3 dirt_b = vec3(0.26, 0.23, 0.20);
+        float clods = warped_fbm(wpos * 0.05 + v_world_pos.y * 0.1);
+        vec3 dirt = mix(dirt_a, dirt_b, clods);
+        float peb = noise(wpos * 0.6 + vec2(v_world_pos.y));
+        dirt = mix(dirt, vec3(0.20, 0.18, 0.16), smoothstep(0.6, 0.8, peb) * 0.4);
+
+        // Rock layer: neutral gray bedrock with sedimentary banding.
+        vec3 rock_a = vec3(0.42, 0.42, 0.43);
+        vec3 rock_b = vec3(0.30, 0.30, 0.31);
+        float rough = warped_fbm(wpos * 0.04);
+        vec3 rock = mix(rock_a, rock_b, rough);
+        float band = sin(v_world_pos.y * 0.55 + noise(wpos * 0.05) * 2.5) * 0.5 + 0.5;
+        rock = mix(rock, vec3(0.50,0.50,0.51), smoothstep(0.55, 0.85, band) * 0.4);
+        float vein = smoothstep(0.8, 0.92, noise(wpos * 0.3 + v_world_pos.y * 0.2));
+        rock = mix(rock, vec3(0.58,0.58,0.60), vein * 0.25);
+
+        // grass(top) -> dirt over [0.5,4], dirt -> rock over [10,18].
+        float toDirt = smoothstep(0.5, 4.0, depth);
+        float toRock = smoothstep(10.0, 18.0, depth);
+        vec3 strata = mix(dirt, rock, toRock);
+        base = mix(base, strata, toDirt);
+
+        // Deeper = darker toward charcoal gray (gray base, never blue).
+        float deep = clamp((depth - 18.0) / 70.0, 0.0, 1.0);
+        base = mix(base, vec3(0.15,0.15,0.16), deep * 0.7);
+    }
+
     // === Global lighting ===
     vec3 sun_dir = normalize(vec3(0.4, 0.85, 0.3));
     float NdotL = max(dot(n, sun_dir), 0.0);

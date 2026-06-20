@@ -173,12 +173,15 @@ public:
             default: base = 1.0f; break;
         }
 
-        // Slope factor: project move direction onto terrain normal XZ
+        // Slope factor: project move direction onto terrain normal XZ.
         glm::vec3 n = get_normal_at(wx, wz);
         float slope_dot = -(n.x * move_dir.x + n.z * move_dir.y); // positive = uphill
-        // uphill: slow down by up to 40%, downhill: speed up by up to 20%
-        float slope_factor = 1.0f - slope_dot * 0.6f;
-        slope_factor = glm::clamp(slope_factor, 0.6f, 1.2f);
+        // Uphill is now a real tactical cost: climbing a steep face drops to
+        // ~35% speed, while charging downhill gives up to +30%. The stronger
+        // multiplier (1.5) plus a lower floor makes holding the high ground
+        // meaningful instead of a tiny nudge.
+        float slope_factor = 1.0f - slope_dot * 1.5f;
+        slope_factor = glm::clamp(slope_factor, 0.35f, 1.3f);
 
         return base * slope_factor;
     }
@@ -526,3 +529,4 @@ public:
         glBindVertexArray(0);
     }
 };
+                                                                                                                                                                                                                                                                                                                               

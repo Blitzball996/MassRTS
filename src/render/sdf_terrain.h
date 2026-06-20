@@ -169,7 +169,9 @@ public:
         return c0*(1-fz)+c1*fz;
     }
     glm::vec3 sdf_gradient(glm::vec3 wp) {
-        float e=voxel_size;
+        // Use finer sampling for normals (0.5m) independent of voxel_size (3m)
+        // to avoid blocky/dirty appearance on terrain
+        float e=0.5f;
         float dx=sample_sdf(wp.x+e,wp.y,wp.z)-sample_sdf(wp.x-e,wp.y,wp.z);
         float dy=sample_sdf(wp.x,wp.y+e,wp.z)-sample_sdf(wp.x,wp.y-e,wp.z);
         float dz=sample_sdf(wp.x,wp.y,wp.z+e)-sample_sdf(wp.x,wp.y,wp.z-e);
@@ -430,11 +432,14 @@ inline void SDFTerrain::emit_vertex(std::vector<float>& v, glm::vec3 p, glm::vec
     float u=(p.x/world_size)+0.5f, vv=(p.z/world_size)+0.5f;
     float surf=original_height_at(p.x,p.z);
     float depth=surf-p.y; // >0 below original ground
-    float biome;
-    if(depth<1.5f) biome = legacy_terrain ? (float)(uint8_t)legacy_terrain->get_biome_at(p.x,p.z) : 0.0f;
-    else if(depth<16.0f) biome=7.0f; // dirt
-    else biome=8.0f;                 // rock
-    // height_norm carries DEPTH so the shader can darken deeper material.
+    // IMPORTANT: store the SURFACE biome ID unchanged. Encoding dirt/rock here
+    // (7/8) made triangles that straddle the depth thresholds interpolate the
+    // biome float through phantom IDs 2..6 (water/sand/snow) -> coloured stripes
+    // all over the mesh (the bug.png artifact). Dirt/rock are now chosen in the
+    // fragment shader from the CONTINUOUS depth channel, which interpolates
+    // safely. So biome stays constant per surface column.
+    float biome = legacy_terrain ? (float)(uint8_t)legacy_terrain->get_biome_at(p.x,p.z) : 0.0f;
+    // height_norm carries DEPTH so the shader can pick dirt/rock and darken.
     float hnorm = depth; // world units below surface (0 at top)
     v.insert(v.end(), {p.x,p.y,p.z, n.x,n.y,n.z, u,vv, biome, hnorm});
 }
@@ -478,4 +483,4 @@ inline void SDFTerrain::smooth(glm::vec3 center, float radius) {
     CarveEvent ev; ev.center=center; ev.radius=radius; ev.op=CarveOp::Dig;
     writeback_heightmap(ev);
 }
-                                                                                                                                  
+                                                                                                                                                                                                                                                                         

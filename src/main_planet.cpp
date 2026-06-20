@@ -12,6 +12,7 @@
 #include "sdfcraft/planet.h"
 #include "sdfcraft/planet_mesh.h"
 #include "sdfcraft/planet_renderer.h"
+#include "render/terrain_noise.h"
 #include <cstdio>
 #include <cmath>
 
@@ -39,11 +40,17 @@ int main() {
     glfwSetCursorPosCallback(win, cursor_cb);
 
     PlanetMesh planet;
-    // a gentle procedural height so the globe reads as land/ocean/mountains
+    // Realistic procedural terrain using 3DWorld's multi-octave FBM noise.
+    // Ridged noise near the equator gives mountain ranges; smoother toward
+    // the poles. Domain warping makes features flow organically.
     planet.height = [&](const dvec3& dir)->double {
-        double n = std::sin(dir.x*8.0)*std::cos(dir.y*6.0)*std::sin(dir.z*7.0);
-        n += 0.5*std::sin(dir.x*23.0+1.0)*std::sin(dir.z*19.0);
-        return n * 3000.0;   // +-~4.5 km relief
+        // Large-scale continents/oceans (low frequency, smooth)
+        double continents = terrain::generate_height(dir, 1500.0, 1.5, terrain::SHAPE_LINEAR, false);
+        // Mountain ranges (ridged, higher frequency, latitude-biased)
+        double mountains = terrain::generate_biome_height(dir, 4000.0);
+        // Combine: mountains rise out of the continental base
+        double h = continents + mountains * 0.6;
+        return h;   // ~ +-5.5 km relief
     };
     PlanetRenderer rend;
     if (!rend.init()){ fprintf(stderr,"planet renderer init failed\n"); return 1; }

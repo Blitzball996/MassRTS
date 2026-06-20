@@ -22,6 +22,7 @@
 // already sketched in src/net/voxel/voxel_net_engine.h.
 // =============================================================================
 #include "world.h"
+#include "net_ops.h"
 #include <vector>
 #include <array>
 #include <cstdint>
@@ -31,7 +32,7 @@ namespace sdfcraft {
 // Result of an edit: which blocks flipped (for drops / FX). Always reported by
 // the LOCAL application so prediction feels instant; the network backend may
 // later reconcile (rare rollback) without changing this immediate feedback.
-using BlockFlips = std::vector<std::array<int,4>>; // {x,y,z, oldBlockId}
+// (BlockFlips is defined in world.h so the net replicator can share it.)
 
 // Abstract replication seam. Both backends implement it; gameplay holds a
 // reference and never knows which one it has.
@@ -104,32 +105,36 @@ public:
     NetWorldOps(World& w, bool is_server)
         : world_(w), local_(w), is_server_(is_server) {}
 
+    // Attach a live replication channel. When set, edits are sent/broadcast and
+    // tick() drains inbound remote edits. Without it, this behaves like
+    // single-player (pure local prediction) so the same backend runs offline.
+    void attachReplicator(EditReplicator* r) { repl_ = r; }
+
     bool carveSphere(float wx, float wy, float wz, float radius,
                      int material, BlockFlips* flips) override {
-        // Predict immediately for responsiveness (client) / apply (server).
-        bool changed = local_.carveSphere(wx, wy, wz, radius, material, flips);
-        // TODO(net B4): if client -> queue VoxelPlayerActionPacket(dig) w/ seq
-        //               if server -> serverAddEdit + serverBroadcastEdit
-        return changed;
+        if (repl_) {
+            // Replicator applies locally AND broadcasts under one seq.
+            return repl_->carve(wx, wy, wz, radius, material, flips);
+        }
+        return local_.carveSphere(wx, wy, wz, radius, material, flips);
     }
 
     bool setBlock(int x, int y, int z, BlockId block) override {
-        bool changed = local_.setBlock(x, y, z, block);
-        // TODO(net B4): send/broadcast place edit as above.
-        return changed;
+        if (repl_) return repl_->place(x, y, z, block);
+        return local_.setBlock(x, y, z, block);
     }
 
     void tick(float /*dt*/) override {
-        // TODO(net B4): poll socket; apply confirmed/broadcast edits to world_;
-        // reconcile any rejected predictions (rollback + replay).
+        if (repl_) repl_->pump();   // apply inbound remote edits this frame
     }
 
     bool isAuthoritative() const override { return is_server_; }
 
 private:
-    World&        world_;
-    LocalWorldOps local_;     // prediction path reused verbatim
-    bool          is_server_;
+    World&         world_;
+    LocalWorldOps  local_;     // prediction path reused verbatim
+    bool           is_server_;
+    EditReplicator* repl_ = nullptr;
 };
 
 } // namespace sdfcraft

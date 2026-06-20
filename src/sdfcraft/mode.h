@@ -18,7 +18,12 @@
 #include "items.h"
 #include "crafting.h"
 #include "chunk_renderer.h"
+#include "hud_renderer.h"
+#include "sky_renderer.h"
 #include "world_ops.h"
+#include "planet.h"
+#include "planet_mesh.h"
+#include "planet_renderer.h"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
@@ -39,8 +44,16 @@ struct FrameInput {
     bool  dig = false;       // left click held
     bool  place = false;     // right click (edge)
     bool  toggle_fly = false;
+    bool  request_fly = false;   // dedicated key: take off / enter fly mode
+    bool  request_walk = false;  // dedicated key: land / enter walk mode
     bool  fly_boost = false;  // hold to fly fast (planet-scale travel)
+    bool  toggle_planet = false;  // G: globe overview view
     int   hotbar_set = -1;   // 0..8 to set slot directly, -1 = none
+    
+    // Terrain sculpting mode keys (1-5 = modes, R/T = radius/strength)
+    bool key_1 = false, key_2 = false, key_3 = false, key_4 = false, key_5 = false;
+    bool key_r_down = false, key_r_up = false;
+    bool key_t_down = false, key_t_up = false;
     int   hotbar_scroll = 0; // wheel
 };
 
@@ -58,6 +71,19 @@ public:
         // change to gameplay code below — every edit already flows through ops_.
         ops_ = std::make_unique<LocalWorldOps>(world);
         if (!renderer_.init(shader_dir)) return false;
+        hud_ready_ = hud_.init();   // 2D overlay; non-fatal if it fails
+        // Gradient sky dome (atmospheric blue + drifting clouds + sun). This was
+        // dead code before — the header was included but never instantiated, so
+        // the background was a flat clear colour. Non-fatal if shaders missing.
+        sky_ready_ = sky_.init(shader_dir);
+        // Planet overview renderer (same game: fly up high + press G to see the
+        // whole globe this local world sits on). Non-fatal if it fails.
+        planet_ready_ = planet_rend_.init();
+        planet_.height = [](const dvec3& dir)->double {
+            double n = std::sin(dir.x*8.0)*std::cos(dir.y*6.0)*std::sin(dir.z*7.0);
+            n += 0.5*std::sin(dir.x*23.0+1.0)*std::sin(dir.z*19.0);
+            return n * 3000.0;
+        };
         spawn_player();
         give_starter_items();
         return true;
@@ -68,9 +94,11 @@ public:
     void useNetworkOps(bool is_server) {
         ops_ = std::make_unique<NetWorldOps>(world, is_server);
     }
-    void shutdown() { renderer_.shutdown(); }
+    void shutdown() { renderer_.shutdown(); if (sky_ready_) sky_.shutdown(); }
 
-    void update(const FrameInput& in, float dt, int view_radius = 8) {
+    void update(const FrameInput& in, float dt, int view_radius = 24) {
+        view_radius_ = view_radius;
+        time_ += dt;   // drives sky cloud drift
         // --- look ---
         player.yaw   += in.look_dx;
         player.pitch -= in.look_dy;
@@ -78,10 +106,13 @@ public:
         if (player.pitch < -89.0f) player.pitch = -89.0f;
 
         if (in.toggle_fly) player.flying = !player.flying;
+        if (in.request_fly)  player.flying = true;   // dedicated take-off key
+        if (in.request_walk) player.flying = false;  // dedicated land key
+        if (in.toggle_planet && planet_ready_) planet_view_ = !planet_view_;
         if (in.hotbar_set >= 0) inv.selected = in.hotbar_set;
         if (in.hotbar_scroll) inv.scroll(in.hotbar_scroll);
 
-        stream_chunks(view_radius);
+        stream_chunks(view_radius, 16);   // wider view + higher budget fills faster
 
         // Pump the replication backend (no-op locally; polls net + reconciles
         // when networked). Keeps gameplay identical across single/multiplayer.
@@ -91,9 +122,21 @@ public:
         glm::vec3 wish(in.move_x, 0, in.move_z);
         player.update(world, dt, wish, in.jump, in.crouch,
                       in.fly_boost ? 12.0f : 1.0f);
+        player.update_camera_smoothing(dt);
 
         // --- targeting ---
         last_hit_ = player.raycast(world, 6.0f);
+
+        // --- Sculpting mode & tool switching (1-5 keys, R/T for radius/strength) ---
+        if (in.key_1) sculpt_mode_ = SculptMode::DIG;
+        if (in.key_2) sculpt_mode_ = SculptMode::RAISE;
+        if (in.key_3) sculpt_mode_ = SculptMode::SMOOTH;
+        if (in.key_4) sculpt_mode_ = SculptMode::FLATTEN;
+        if (in.key_5) sculpt_mode_ = SculptMode::BOXIFY;
+        if (in.key_r_down) dig_radius_ = std::min(dig_radius_ + 0.3f, 8.0f);  // increase radius
+        if (in.key_r_up) dig_radius_ = std::max(dig_radius_ - 0.3f, 0.5f);   // decrease radius
+        if (in.key_t_down) sculpt_strength_ = std::min(sculpt_strength_ + 0.1f, 2.0f);
+        if (in.key_t_up) sculpt_strength_ = std::max(sculpt_strength_ - 0.1f, 0.1f);
 
         // --- dig (rate-limited by block hardness / tool) ---
         dig_cooldown_ -= dt;
@@ -109,33 +152,152 @@ public:
     }
 
     void render(int fb_w, int fb_h) {
-        glm::mat4 view = glm::lookAt(player.eye(), player.eye() + player.forward(), glm::vec3(0,1,0));
+        glm::vec3 eye = player.render_eye();
+        glm::mat4 view = glm::lookAt(eye, eye + player.forward(), glm::vec3(0,1,0));
         float aspect = fb_h > 0 ? (float)fb_w / (float)fb_h : 1.7778f;
-        glm::mat4 proj = glm::perspective(glm::radians(70.0f), aspect, 0.05f, 1000.0f);
+        // Far plane scales with how far we can actually see: on the ground it's
+        // ~1km, but climbing toward orbit we push it out to tens of km so the
+        // horizon and the planet below stay visible instead of being clipped.
+        float alt = player.pos.y;
+        float far_plane = 2500.0f + std::max(0.0f, alt) * 40.0f;
+        if (far_plane > 200000.0f) far_plane = 200000.0f;
+        glm::mat4 proj = glm::perspective(glm::radians(70.0f), aspect, 0.05f, far_plane);
 
-        glm::vec3 sky(0.55f, 0.72f, 0.92f);
+        // Sky darkens toward deep blue / black as you climb toward orbit, so the
+        // clear colour matches the thinning fog for a seamless ground->space fade.
+        float sky_t = glm::clamp((std::max(0.0f, alt) - 80.0f) / 4000.0f, 0.0f, 1.0f);
+        glm::vec3 sky = glm::mix(glm::vec3(0.55f, 0.72f, 0.92f),
+                                 glm::vec3(0.02f, 0.03f, 0.08f), sky_t);
         glClearColor(sky.r, sky.g, sky.b, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glEnable(GL_DEPTH_TEST);
         glEnable(GL_CULL_FACE); glCullFace(GL_BACK); glFrontFace(GL_CCW);
 
-        renderer_.sync(world, player.eye());
         glm::vec3 sun = glm::normalize(glm::vec3(0.4f, 0.85f, 0.3f));
-        float fog_end = (8 * CHUNK_SX) * 0.95f;
-        renderer_.render(world, view, proj, player.eye(), sun, sky, fog_end * 0.55f, fog_end);
+
+        // --- Gradient sky dome (drawn first, fills the background) -----------
+        // A real procedural sky (blue gradient + sun + drifting clouds) instead
+        // of the old flat clear colour. It draws at the far plane so any terrain
+        // or the planet backdrop composites on top of it. Skip it at high
+        // altitude where the clear-colour space fade takes over.
+        if (sky_ready_ && sky_t < 0.85f)
+            sky_.render(view, proj, sun, time_);
+
+        if (planet_view_ && planet_ready_) {
+            // Pull the camera way back so the whole globe fits in frame.
+            // Mesh is built camera-relative (double precision), so the eye
+            // sits at the origin and the planet centre is in front of it.
+            double R = planet_.cfg.radius_m;
+            dvec3  cam_pos(0.0, 0.0, R * 3.0);
+            planet_.update_lod(cam_pos);
+            std::vector<PlanetVertex> verts;
+            planet_.build(cam_pos, verts);
+            planet_rend_.upload(verts);
+
+            glm::vec3 center_rel = glm::vec3(-cam_pos.x, -cam_pos.y, -cam_pos.z);
+            glm::mat4 pview = glm::lookAt(glm::vec3(0.0f), center_rel, glm::vec3(0,1,0));
+            glm::mat4 pproj = glm::perspective(glm::radians(45.0f), aspect,
+                                               (float)(R * 0.01),
+                                               (float)(R * 10.0));
+            planet_rend_.render(pview, pproj, sun, glm::vec3(0,1,0));
+            return;
+        }
+
+        // --- Seamless planet backdrop --------------------------------------
+        // The flat local block world sits on the surface of the globe. We place
+        // the planet centre R metres straight below local sea level and draw the
+        // LOD globe as a far backdrop FIRST, then clear depth and draw the local
+        // terrain on top. Low down you just see a faint curved horizon; climbing
+        // smoothly reveals real planetary curvature and the limb against space —
+        // no fog wall, a continuous ground->sky->orbit gradient.
+        if (planet_ready_) {
+            render_planet_backdrop(eye, view, aspect, alt);
+            glClear(GL_DEPTH_BUFFER_BIT);   // local terrain always on top
+        }
+
+        // Meshing is now memory-bound and sub-millisecond per chunk, so we can
+        // afford a larger time budget to resolve a freshly-streamed region fast
+        // without reintroducing the old multi-chunk frame spikes.
+        renderer_.sync(world, player.eye(), 6.0);
+        // Fog tuned to the loaded view distance, and pushed WAY back as you climb
+        // so flying up doesn't bury you in haze. At altitude the fog all but
+        // disappears, giving the seamless ground->sky->planet gradient.
+        float view_dist = (float)view_radius_ * CHUNK_SX;
+        float climb = std::max(0.0f, alt - 80.0f);
+        float fog_end = view_dist * 0.95f + climb * 30.0f;
+        float fog_start = fog_end * 0.70f + climb * 20.0f;
+        // Sky/fog colour lightens and the fog thins with altitude so the
+        // transition to the deep-blue upper atmosphere reads smoothly.
+        float t_alt = glm::clamp(climb / 4000.0f, 0.0f, 1.0f);
+        glm::vec3 fog_color = glm::mix(sky, glm::vec3(0.02f, 0.03f, 0.08f), t_alt);
+        renderer_.render(world, view, proj, eye, sun, fog_color, fog_start, fog_end);
 
         if (last_hit_.hit)
             renderer_.render_selection(view, proj, glm::ivec3(last_hit_.bx, last_hit_.by, last_hit_.bz));
+
+        // 2D HUD overlay last, on top of everything.
+        if (hud_ready_)
+            hud_.draw(fb_w, fb_h, player, inv);
     }
 
     const RayHit& target() const { return last_hit_; }
 
 private:
-    ChunkRenderer renderer_;
+    // Draw the LOD globe as a backdrop behind the local terrain. The planet
+    // centre sits R metres below local sea level so the local ground rests on
+    // the sphere's surface; as the player climbs, more of the curve/limb shows.
+    void render_planet_backdrop(const glm::vec3& eye, const glm::mat4& view,
+                                float aspect, float alt) {
+        double R = planet_.cfg.radius_m;
+        // Camera position in planet space: straight up from the surface by the
+        // player's altitude above sea level (local x/z map to a tiny tangent
+        // offset that's negligible against an Earth-sized radius, so we keep the
+        // camera on the local "up" axis for a stable, jitter-free backdrop).
+        double sea = (double)world.sea_level;
+        double h_above = (double)alt - sea;            // metres above sea level
+        if (h_above < 1.0) h_above = 1.0;
+        dvec3 cam_pos(0.0, R + h_above, 0.0);          // +Y is local up
+
+        planet_.update_lod(cam_pos);
+        std::vector<PlanetVertex> verts;
+        planet_.build(cam_pos, verts);
+        planet_rend_.upload(verts);
+
+        // Reuse the player's orientation but with the planet's own projection so
+        // the horizon lines up. View rotation only (eye at origin = floating
+        // origin); the mesh is already camera-relative.
+        glm::mat4 rot = glm::mat4(glm::mat3(view));
+        // Far plane must reach the limb: distance to horizon ~ sqrt(2*R*h).
+        float horizon = (float)std::sqrt(2.0 * R * h_above) + (float)R * 0.05f;
+        glm::mat4 pproj = glm::perspective(glm::radians(70.0f), aspect,
+                                           std::max(1.0f, (float)h_above * 0.5f),
+                                           horizon * 1.2f);
+        glm::vec3 sun = glm::normalize(glm::vec3(0.4f, 0.85f, 0.3f));
+        glDepthMask(GL_FALSE);
+        planet_rend_.render(rot, pproj, sun, glm::vec3(0,1,0));
+        glDepthMask(GL_TRUE);
+    }
+
+
+    ChunkRenderer  renderer_;
+    HudRenderer    hud_;
+    bool           hud_ready_ = false;
+    SkyRenderer    sky_;
+    bool           sky_ready_ = false;
+    float          time_ = 0.0f;        // seconds, drives sky cloud drift
+    PlanetMesh     planet_;
+    PlanetRenderer planet_rend_;
+    bool           planet_view_ = false;   // G toggles globe overview
+    bool           planet_ready_ = false;
+    int            view_radius_ = 8;   // last view radius (for fog/far scaling)
     std::unique_ptr<WorldOps> ops_;   // replication seam (local or networked)
     RayHit last_hit_;
     float  dig_cooldown_ = 0.0f;
     float  dig_radius_ = 1.8f;   // smooth spherical carve radius (blocks), MassRTS-style
+    
+    // Terrain sculpting mode (MassRTS-style tools)
+    enum class SculptMode { DIG, RAISE, SMOOTH, FLATTEN, BOXIFY } sculpt_mode_ = SculptMode::DIG;
+    float sculpt_strength_ = 1.0f;
 
     void spawn_player() {
         int h = world.surface_height(0, 0);
@@ -179,7 +341,7 @@ private:
     // each frame, nearest first, and the rest stream in over subsequent frames.
     // Meshing is already bounded (ChunkRenderer::sync max_rebuild), so the two
     // together keep frame time flat while exploring the infinite world.
-    void stream_chunks(int view_radius, int gen_budget = 4) {
+    void stream_chunks(int view_radius, int gen_budget = 6) {
         ChunkKey center = World::world_to_chunk((int)floorf(player.pos.x), (int)floorf(player.pos.z));
 
         // Gather missing chunks in the view disk, sorted by distance (nearest
@@ -231,30 +393,64 @@ private:
             ops_->setBlock(last_hit_.bx, last_hit_.by, last_hit_.bz, BLOCK_AIR);
             if (!(need > 0 && (!right_tool || tool.tier < need)))
                 inv.add(block_item(center), 1, item_max_stack(block_item(center)));
+            
+            // === Tree physics: check if breaking this block causes tree to collapse ===
+            if (center == BLOCK_LOG || center == BLOCK_LEAVES) {
+                std::vector<std::array<int,4>> drops;
+                world.check_tree_collapse(last_hit_.bx, last_hit_.by, last_hit_.bz, &drops);
+                // Award dropped items from collapsed tree blocks
+                for (auto& d : drops) {
+                    BlockId dropped = (BlockId)d[3];
+                    inv.add(block_item(dropped), 1, item_max_stack(block_item(dropped)));
+                }
+            }
             return;
         }
 
-        // --- smooth spherical carve (MassRTS sdf_terrain style) for terrain ---
-        // Modify the continuous SDF field with a smooth-min sphere centred on the
-        // precise ray contact point. Marching Cubes then meshes a rounded bowl
-        // (no stair-stepping), and carve_sphere reports which blocks flipped to
-        // air so we can award drops with the usual tool-tier gate.
+        // --- terrain sculpting with multiple modes (MassRTS-style tools) ---
         glm::vec3 hp = last_hit_.point;
-        std::vector<std::array<int,4>> flips;
-        // Route through the replication seam (local apply + prediction; the
-        // network backend additionally sends/validates/broadcasts the edit).
-        ops_->carveSphere(hp.x, hp.y, hp.z, dig_radius_, -1, &flips);
-
-        for (auto& f : flips) {
-            BlockId b = (BlockId)f[3];
-            uint8_t need = block_min_tier(b);
-            bool right_tool = (block_pref_tool(b) == ToolKind::None) ||
-                              (tool.tool == block_pref_tool(b));
-            if (need > 0 && (!right_tool || tool.tier < need)) continue; // no drop
-            BlockId drop = (b == BLOCK_STONE) ? BLOCK_COBBLE
-                         : (b == BLOCK_GRASS) ? BLOCK_DIRT
-                         : b;
-            inv.add(block_item(drop), 1, item_max_stack(block_item(drop)));
+        
+        switch (sculpt_mode_) {
+            case SculptMode::DIG: {
+                // Original dig: smooth spherical carve
+                std::vector<std::array<int,4>> flips;
+                ops_->carveSphere(hp.x, hp.y, hp.z, dig_radius_, -1, &flips);
+                for (auto& f : flips) {
+                    BlockId b = (BlockId)f[3];
+                    uint8_t need = block_min_tier(b);
+                    bool right_tool = (block_pref_tool(b) == ToolKind::None) ||
+                                      (tool.tool == block_pref_tool(b));
+                    if (need > 0 && (!right_tool || tool.tier < need)) continue;
+                    BlockId drop = (b == BLOCK_STONE) ? BLOCK_COBBLE
+                                 : (b == BLOCK_GRASS) ? BLOCK_DIRT : b;
+                    inv.add(block_item(drop), 1, item_max_stack(block_item(drop)));
+                }
+                // Auto-smooth after deep digging to prevent marching cubes artifacts
+                if (hp.y < 30.0f && !flips.empty()) {
+                    world.smooth_terrain(hp.x, hp.y, hp.z, dig_radius_ * 1.1f, 0.3f);
+                }
+                break;
+            }
+            case SculptMode::RAISE: {
+                // Push terrain up (mountain building)
+                world.raise_terrain(hp.x, hp.y, hp.z, dig_radius_ * 1.5f, sculpt_strength_ * 0.3f);
+                break;
+            }
+            case SculptMode::SMOOTH: {
+                // Smooth out marching cubes artifacts
+                world.smooth_terrain(hp.x, hp.y, hp.z, dig_radius_ * 1.2f, sculpt_strength_ * 0.5f);
+                break;
+            }
+            case SculptMode::FLATTEN: {
+                // Flatten to hit point's Y level (platforms)
+                world.flatten_terrain(hp.x, hp.y, hp.z, dig_radius_ * 1.5f, hp.y, sculpt_strength_ * 0.35f);
+                break;
+            }
+            case SculptMode::BOXIFY: {
+                // Turn smooth cave into cubic room (dungeons)
+                world.boxify_terrain(hp.x, hp.y, hp.z, dig_radius_, sculpt_strength_ * 0.7f);
+                break;
+            }
         }
     }
 
@@ -272,11 +468,25 @@ private:
     void do_place() {
         ItemStack& h = inv.held();
         if (h.empty() || !item_is_block(h.id)) return;
+        
+        // Allow placing on terrain surface (embed into ground like Minecraft)
         int px = last_hit_.bx + last_hit_.nx;
         int py = last_hit_.by + last_hit_.ny;
         int pz = last_hit_.bz + last_hit_.nz;
-        if (world.get_block(px, py, pz) != BLOCK_AIR) return;
+        
+        // If target is terrain (not air/water), place ON the hit block instead of adjacent
+        BlockId target = world.get_block(px, py, pz);
+        if (block_is_terrain(target)) {
+            // Place on the terrain surface (embed into ground)
+            px = last_hit_.bx;
+            py = last_hit_.by;
+            pz = last_hit_.bz;
+        } else if (target != BLOCK_AIR) {
+            return; // can't place if space occupied by non-terrain block
+        }
+        
         if (overlaps_player(px, py, pz)) return; // don't seal yourself in
+        
         // Route through replication seam (local apply now; net send when online).
         if (ops_->setBlock(px, py, pz, item_block(h.id)))
             inv.consume_held();

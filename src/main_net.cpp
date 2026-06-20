@@ -1,0 +1,698 @@
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <iostream>
+#include <random>
+#include <cstring>
+#include <cstdio>
+#include <cmath>
+#include <vector>
+#include <algorithm>
+#include <thread>
+#include <atomic>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#endif
+
+#include "ecs/world.h"
+#include "ecs/components.h"
+#include "ai/combat_system.h"
+#include "ai/movement_system.h"
+#include "render/renderer.h"
+#include "input/camera.h"
+#include "ui/hud.h"
+#include "game/game_state.h"
+#include "ui/menu.h"
+#include "net_integration.h"
+#define MINIAUDIO_IMPLEMENTATION
+#include "audio/audio_system.h"
+
+Camera g_camera;
+NetworkState* g_net_state = nullptr;
+bool g_selecting = false;
+glm::vec2 g_select_start = {0, 0};
+int g_screen_w = 1600, g_screen_h = 900;
+World* g_world = nullptr;
+Renderer* g_renderer = nullptr;
+
+// Nuke targeting mode
+bool g_nuke_targeting = false;
+// Game state machine
+GameState g_game_state;
+MenuRenderer g_menu;
+bool g_mouse_clicked_this_frame = false;
+
+// Shop state
+int g_shop_selection = -1; // -1 = no selection
+int g_buy_count = 1000; // buy in batches of 1000
+
+void fatal_error(const char* msg) {
+    std::cerr << msg << std::endl;
+#ifdef _WIN32
+    MessageBoxA(NULL, msg, "MassRTS Error", MB_OK | MB_ICONERROR);
+#endif
+}
+
+void scroll_callback(GLFWwindow* w, double x, double y) { g_camera.on_scroll(y); }
+
+static float s_terrain_height(float x, float z) {
+    return g_renderer ? g_renderer->terrain.get_height_at(x, z) : 0.0f;
+}
+
+void mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
+    // Skip game input during menu phases
+    if (g_game_state.phase != GamePhase::Playing) {
+        if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS)
+            g_mouse_clicked_this_frame = true;
+        return;
+    }
+    double mx, my;
+    glfwGetCursorPos(window, &mx, &my);
+    World& world = *g_world;
+
+    if (button == GLFW_MOUSE_BUTTON_LEFT) {
+        if (action == GLFW_PRESS) {
+            // Nuke targeting: left click to confirm target
+            if (g_nuke_targeting) {
+                Ray ray = g_camera.screen_to_ray((float)mx, (float)my, g_screen_w, g_screen_h);
+                glm::vec2 target = g_camera.ray_to_ground(ray);
+                glm::vec3 to(target.x, 0, target.y);
+                g_renderer->projectiles.spawn_nuke(to + glm::vec3(0,400,0), to, Faction::Red);
+                world.add_rad_zone(target, 100.0f, 10.0f, Faction::Red);
+                world.score[0] -= world.nuke_cost;
+                world.nuke_ready[0] = (world.score[0] >= world.nuke_cost);
+                g_nuke_targeting = false;
+                return;
+            }
+
+            g_selecting = true;
+            g_select_start = {(float)mx, (float)my};
+        } else if (action == GLFW_RELEASE && g_selecting) {
+            g_selecting = false;
+            glm::vec2 end_screen = {(float)mx, (float)my};
+            Ray r1 = g_camera.screen_to_ray(g_select_start.x, g_select_start.y, g_screen_w, g_screen_h);
+            Ray r2 = g_camera.screen_to_ray(end_screen.x, end_screen.y, g_screen_w, g_screen_h);
+            glm::vec2 w1 = g_camera.ray_to_ground(r1);
+            glm::vec2 w2 = g_camera.ray_to_ground(r2);
+            glm::vec2 box_min = glm::min(w1, w2);
+            glm::vec2 box_max = glm::max(w1, w2);
+
+            for (uint32_t i = 0; i < world.entity_count; i++)
+                world.selection.selected[i] = false;
+
+            float area = (box_max.x-box_min.x)*(box_max.y-box_min.y);
+            if (area < 100.0f) {
+                glm::vec2 click = (w1+w2)*0.5f;
+                float best = 400.0f; Entity be = INVALID_ENTITY;
+                for (uint32_t i = 0; i < world.entity_count; i++) {
+                    if (!world.is_alive(i) || !world.selection.player_owned[i]) continue;
+                    float d = glm::length(world.transforms.position[i] - click);
+                    if (d < best) { best = d; be = i; }
+                }
+                if (be != INVALID_ENTITY) world.selection.selected[be] = true;
+            } else {
+                for (uint32_t i = 0; i < world.entity_count; i++) {
+                    if (!world.is_alive(i) || !world.selection.player_owned[i]) continue;
+                    glm::vec2 p = world.transforms.position[i];
+                    if (p.x >= box_min.x && p.x <= box_max.x && p.y >= box_min.y && p.y <= box_max.y)
+                        world.selection.selected[i] = true;
+                }
+            }
+        }
+    }
+
+    if (button == GLFW_MOUSE_BUTTON_RIGHT && action == GLFW_PRESS) {
+        if (g_nuke_targeting) { g_nuke_targeting = false; return; } // cancel nuke
+
+        Ray ray = g_camera.screen_to_ray((float)mx, (float)my, g_screen_w, g_screen_h);
+        glm::vec2 target = g_camera.ray_to_ground(ray);
+
+        std::vector<Entity> selected;
+        for (uint32_t i = 0; i < world.entity_count; i++)
+            if (world.selection.selected[i] && world.is_alive(i))
+                selected.push_back(i);
+
+        if (!selected.empty()) {
+            int cols = std::max(1, (int)sqrt((float)selected.size()));
+            float spacing = 6.0f;
+            for (size_t idx = 0; idx < selected.size(); idx++) {
+                Entity e = selected[idx];
+                int row = (int)idx/cols, col = (int)idx%cols;
+                float ox = ((float)col - cols*0.5f)*spacing;
+                float oy = ((float)row - (float)(selected.size()/cols)*0.5f)*spacing;
+                world.commands.move_target[e] = target + glm::vec2(ox, oy);
+                world.commands.has_move_command[e] = true;
+                world.units.target[e] = INVALID_ENTITY;
+                world.units.state[e] = UnitState::Moving;
+            }
+            // Send move command to network (if multiplayer)
+            if (g_net_state && g_net_state->isMultiplayer() && !selected.empty()) {
+                g_net_state->queueMoveCommand(target, selected.front(), selected.back() + 1);
+            }
+            // Waypoint visual effect - green ring particles
+            float ty = g_renderer->terrain.get_height_at(target.x, target.y) + 1.0f;
+            for (int p = 0; p < 16; p++) {
+                float a = (float)p / 16.0f * 6.283f;
+                Particle wp;
+                wp.position = glm::vec3(target.x + cos(a)*8.0f, ty, target.y + sin(a)*8.0f);
+                wp.velocity = glm::vec3(cos(a)*5.0f, 10.0f, sin(a)*5.0f);
+                wp.color = glm::vec3(0.2f, 1.0f, 0.3f);
+                wp.life = 0.8f;
+                wp.size = 2.0f;
+                if (g_renderer->particles.particles.size() < ParticleSystem::MAX_PARTICLES)
+                    g_renderer->particles.particles.push_back(wp);
+            }
+        }
+    }
+    // Middle mouse: set rally point
+    if (button == GLFW_MOUSE_BUTTON_MIDDLE && action == GLFW_PRESS) {
+        Ray ray = g_camera.screen_to_ray((float)mx, (float)my, g_screen_w, g_screen_h);
+        glm::vec2 target = g_camera.ray_to_ground(ray);
+        g_game_state.set_rally_point(target);
+        // Visual feedback
+        float ty = g_renderer->terrain.get_height_at(target.x, target.y) + 1.0f;
+        for (int p = 0; p < 24; p++) {
+            float a = (float)p / 24.0f * 6.283f;
+            Particle rp;
+            rp.position = glm::vec3(target.x + cos(a)*12.0f, ty, target.y + sin(a)*12.0f);
+            rp.velocity = glm::vec3(0, 15.0f, 0);
+            rp.color = glm::vec3(0.1f, 1.0f, 0.4f);
+            rp.life = 1.2f;
+            rp.size = 3.0f;
+            if (g_renderer->particles.particles.size() < ParticleSystem::MAX_PARTICLES)
+                g_renderer->particles.particles.push_back(rp);
+        }
+    }
+}
+
+void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+    if (action != GLFW_PRESS) return;
+    World& world = *g_world;
+
+    // N: enter nuke targeting mode
+    if (key == GLFW_KEY_N && world.nuke_ready[0]) {
+        g_nuke_targeting = !g_nuke_targeting;
+    }
+
+    // Number keys 1-9: buy unit from shop
+    if (key >= GLFW_KEY_1 && key <= GLFW_KEY_9) {
+        int idx = key - GLFW_KEY_1;
+        if (idx < SHOP_COUNT) {
+            // Buy at player spawn area
+            glm::vec2 spawn = g_game_state.rally_point;
+            int bought = world.buy_batch(idx, g_buy_count, spawn, Faction::Red);
+            if (bought > 0) {
+                std::cout << "Bought " << bought << "x " << UNIT_SHOP[idx].name << "\n";
+            }
+        }
+    }
+
+    // +/- change batch size
+    if (key == GLFW_KEY_EQUAL) g_buy_count = std::min(5000, g_buy_count + 500);
+    if (key == GLFW_KEY_MINUS) g_buy_count = std::max(100, g_buy_count - 500);
+}
+
+void spawn_army(World& world, Faction faction, glm::vec2 center, int count,
+                glm::vec3 base_color, bool player_owned) {
+    std::mt19937 rng(42 + (uint32_t)faction * 7777);
+    bool is_enemy = (faction == Faction::Blue);
+
+    struct SpawnDef { UnitType type; float pct; float hp,dmg,range,spd,scl; };
+    std::vector<SpawnDef> comp;
+
+    if (is_enemy) {
+        comp = {
+            {UnitType::Infantry, 0.25f, 100,10,8,6,2.0f},
+            {UnitType::Cavalry, 0.12f, 150,18,8,12,2.5f},
+            {UnitType::Archer, 0.18f, 60,12,100,4,1.8f},
+            {UnitType::Bomber, 0.05f, 80,80,12,5,2.2f},
+            {UnitType::Artillery, 0.08f, 70,40,200,2,2.8f},
+            {UnitType::Shield, 0.05f, 200,8,6,4,2.2f},
+            {UnitType::Samurai, 0.17f, 120,22,8,10,2.0f},
+            {UnitType::Militia, 0.10f, 60,6,6,5,1.8f},
+        };
+    } else {
+        comp = {
+            {UnitType::Infantry, 0.30f, 100,10,8,6,2.0f},
+            {UnitType::Cavalry, 0.12f, 150,18,8,12,2.5f},
+            {UnitType::Archer, 0.20f, 60,12,100,4,1.8f},
+            {UnitType::Bomber, 0.06f, 80,80,12,5,2.2f},
+            {UnitType::Artillery, 0.10f, 70,40,200,2,2.8f},
+            {UnitType::Shield, 0.12f, 200,8,6,4,2.2f},
+            {UnitType::Militia, 0.10f, 60,6,6,5,1.8f},
+        };
+    }
+
+    float sign = (faction == Faction::Red) ? 1.0f : -1.0f;
+    float y_offset = 0;
+
+    for (auto& def : comp) {
+        int n = (int)(count * def.pct);
+        int cols = std::max(1, (int)sqrt((float)n * 2.0f));
+        float spacing = 6.5f;
+        std::uniform_real_distribution<float> jit(-1.5f, 1.5f);
+
+        for (int i = 0; i < n; i++) {
+            Entity e = world.create_entity();
+            if (e == INVALID_ENTITY) return;
+            int row = i/cols, col = i%cols;
+            glm::vec2 pos = center + glm::vec2(
+                (col - cols*0.5f)*spacing + jit(rng),
+                y_offset + (row - n/cols*0.5f)*spacing + jit(rng));
+
+            world.transforms.position[e] = pos;
+            world.transforms.velocity[e] = {0,0};
+            world.transforms.rotation[e] = (faction==Faction::Red)?0.0f:3.14159f;
+            world.transforms.y_offset[e] = 0;
+            world.transforms.y_velocity[e] = 0;
+            world.units.faction[e] = faction;
+            world.units.type[e] = def.type;
+            world.units.state[e] = UnitState::Idle;
+            world.units.health[e] = def.hp;
+            world.units.max_health[e] = def.hp;
+            world.units.attack_damage[e] = def.dmg;
+            world.units.attack_range[e] = def.range;
+            world.units.speed[e] = def.spd;
+            world.units.attack_cooldown[e] = 0;
+            world.units.target[e] = INVALID_ENTITY;
+            world.units.hit_timer[e] = 0;
+            world.units.ragdoll_timer[e] = 0;
+            world.units.is_structure[e] = false;
+            world.renders.color[e] = base_color;
+            world.renders.scale[e] = def.scl;
+            world.selection.player_owned[e] = player_owned;
+            world.selection.selected[e] = false;
+            world.commands.has_move_command[e] = false;
+        }
+        y_offset += 80.0f * sign;
+    }
+}
+
+int main(int argc, char* argv[]) {
+    std::string exe_path = argv[0];
+    
+    // === Network Setup ===
+    bool is_server = false, is_client = false;
+    std::string server_ip = "127.0.0.1", player_name = "Player";
+    uint16_t server_port = 27015;
+    
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "--server" || arg == "-s") {
+            is_server = true;
+            if (i+1 < argc && argv[i+1][0] != '-') server_port = (uint16_t)std::atoi(argv[++i]);
+        } else if (arg == "--client" || arg == "-c") {
+            is_client = true;
+            if (i+1 < argc && argv[i+1][0] != '-') server_ip = argv[++i];
+            if (i+1 < argc && argv[i+1][0] != '-') server_port = (uint16_t)std::atoi(argv[++i]);
+        } else if (arg == "--name" || arg == "-n") {
+            if (i+1 < argc) player_name = argv[++i];
+        } else if (arg == "--help" || arg == "-h") {
+            std::cout << "MassRTS Multiplayer\n  MassRTS.exe --server [port]\n  MassRTS.exe --client <ip> [port]\n  --name <name>\n";
+            return 0;
+        }
+    }
+    #ifdef _WIN32
+    UDPSocket::init_network();
+    #endif
+    if (!glfwInit()) { fatal_error("GLFW failed"); return -1; }
+
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_SAMPLES, 4);
+
+    GLFWwindow* window = glfwCreateWindow(1600, 900, "MassRTS 3D", nullptr, nullptr);
+    if (!window) { fatal_error("Window failed"); glfwTerminate(); return -1; }
+
+    glfwMakeContextCurrent(window);
+    glfwSetScrollCallback(window, scroll_callback);
+    glfwSetMouseButtonCallback(window, mouse_button_callback);
+    glfwSetKeyCallback(window, key_callback);
+    glfwSwapInterval(1);
+
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) { fatal_error("GLAD failed"); return -1; }
+    glEnable(GL_MULTISAMPLE);
+    std::cout << "OpenGL: " << glGetString(GL_VERSION) << "\n";
+    std::cout << "GPU: " << glGetString(GL_RENDERER) << "\n";
+
+    World* world_ptr = new World();
+    g_world = world_ptr;
+    World& world = *world_ptr;
+
+    // === Network Integration ===
+    NetworkState net_state;
+    g_net_state = &net_state;
+    if (is_server && !net_state.startHost(server_port, player_name)) { std::cerr << net_state.connection_status << "\n"; return -1; }
+    if (is_client && !net_state.startClient(server_ip, server_port, player_name)) { std::cerr << net_state.connection_status << "\n"; return -1; }
+    if (net_state.isMultiplayer()) std::cout << "[Net] " << net_state.connection_status << "\n";
+
+    Renderer renderer;
+    g_renderer = &renderer;
+    renderer.set_base_path(exe_path);
+    if (!renderer.init(1600, 900)) { fatal_error("Renderer failed"); return -1; }
+    g_menu.init(1600, 900);
+
+    // === MP_SEED_SYNC: regenerate terrain from network-supplied seed ===
+    // In multiplayer every peer must build the SAME map. The host picks a
+    // seed at hostGame() time and sends it in the accept packet; clients
+    // received it during the handshake. Rebuild the terrain deterministically.
+    if (net_state.isMultiplayer()) {
+        if (!net_state.waitForHandshake(8.0))
+            std::cerr << "[Net] WARNING: handshake timed out; map may desync\n";
+        uint32_t map_seed = (uint32_t)(net_state.terrainSeed() & 0xFFFFFFFFu);
+        renderer.terrain.generate_with_seed(map_seed);
+        renderer.decor.generate(6000.0f, [&renderer](float x, float z){
+            return renderer.terrain.get_height_at(x, z); });
+        std::cout << "[Net] Terrain rebuilt from shared seed=" << map_seed << "\n";
+    }
+
+    CombatSystem* combat = new CombatSystem();
+    combat->proj_sys = &renderer.projectiles;
+    MovementSystem movement;
+    movement.terrain_ptr = &renderer.terrain;
+    UI hud;
+    hud.init(1600, 900);
+
+    AudioSystem audio;
+    audio.init();
+
+    std::cout << "Deploying armies...\n";
+    spawn_army(world, Faction::Red, {-400, 0}, 15000, {0.25f, 0.3f, 0.2f}, true);
+    spawn_army(world, Faction::Blue, {400, 0}, 15000, {0.50f, 0.35f, 0.15f}, false);
+    g_game_state.init_capture_points(g_game_state.selected_map);
+    g_game_state.phase = GamePhase::Playing;
+    std::cout << "Deployed " << world.entity_count << " units\n";
+    std::cout << "Controls: 1-9=Buy units, +/-=batch size, N=Nuke(click target), RMB=Move\n";
+
+    g_camera.target = {0, 20, 0};
+    g_camera.distance = 200.0f;  // Close up, immersive
+    g_camera.pitch = 35.0f;      // Lower angle for drama
+
+    double last_time = glfwGetTime();
+    int frame_count = 0;
+    double fps_timer = 0;
+    uint32_t ai_batch = 0;
+
+    // Enemy AI economy: auto-buy timer
+    float enemy_buy_timer = 0;
+
+    while (!glfwWindowShouldClose(window)) {
+        double now = glfwGetTime();
+        float dt = std::min((float)(now - last_time), 0.05f);
+        last_time = now;
+
+        frame_count++;
+        fps_timer += dt;
+        if (fps_timer >= 1.0) {
+            hud.fps = frame_count;
+            char title[128];
+            snprintf(title, 128, "MassRTS | FPS:%d | Units:%u | $%d | Score:%d",
+                     frame_count, world.entity_count, world.money[0], world.score[0]);
+            glfwSetWindowTitle(window, title);
+            frame_count = 0; fps_timer = 0;
+        }
+
+        glfwPollEvents();
+        if (net_state.isMultiplayer()) net_state.update(world, dt);
+        g_mouse_clicked_this_frame = false;
+        if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+            glfwSetWindowShouldClose(window, true);
+        glfwGetFramebufferSize(window, &g_screen_w, &g_screen_h);
+        g_camera.update(window, dt);
+
+        // === Economy ===
+        world.tick_economy(dt);
+
+        // Enemy auto-buy (every 8 seconds, buys mixed troops)
+        if (!net_state.isMultiplayer()) {
+        enemy_buy_timer += dt;
+        if (enemy_buy_timer > 8.0f && combat->faction_alive[1] < 20000) {
+            enemy_buy_timer = 0;
+            int budget = world.money[1];
+            // Buy mix: samurai, infantry, archers
+            std::mt19937 erng((uint32_t)(now * 100));
+            std::uniform_int_distribution<int> pick(0, 6);
+            glm::vec2 espawn(400, std::uniform_real_distribution<float>(-200,200)(erng));
+            while (budget > 100) {
+                int idx = pick(erng);
+                if (idx >= SHOP_COUNT) idx = 1;
+                const auto& entry = UNIT_SHOP[idx];
+                if (entry.cost > budget) { idx = 0; } // fallback to militia
+                int affordable = std::min(500, budget / UNIT_SHOP[idx].cost);
+                if (affordable <= 0) break;
+                int bought = 0;
+                int cols = std::max(1, (int)sqrt((float)affordable));
+                for (int i = 0; i < affordable; i++) {
+                    int row=i/cols, col=i%cols;
+                    glm::vec2 pos = espawn + glm::vec2((col-cols*0.5f)*6.5f,(row-affordable/cols*0.5f)*6.5f);
+                    Entity e = world.buy_unit(idx, pos, Faction::Blue);
+                    if (e == INVALID_ENTITY) break;
+                    world.selection.player_owned[e] = false;
+                    world.renders.color[e] = glm::vec3(0.50f, 0.35f, 0.15f);
+                    bought++;
+                }
+                budget = world.money[1];
+                if (bought == 0) break;
+            }
+        }
+
+
+        }
+
+        // === Combat AI ===
+        bool sim_active = (g_game_state.phase == GamePhase::Playing);
+        if (sim_active) {
+
+        // Combat AI (CPU - handles all unit types correctly)
+        combat->update_batched(world, dt, ai_batch, 25000);
+        ai_batch += 25000;
+        if (ai_batch >= world.entity_count) ai_batch = 0;
+
+        // Movement (CPU multithreaded - handles terrain, separation)
+        movement.update(world, dt, combat->grid);
+
+        // === Territory Control ===
+        if (g_game_state.phase == GamePhase::Playing) {
+            static std::vector<uint8_t> territory_alive;
+            territory_alive.resize(world.entity_count);
+            for (uint32_t i=0; i<world.entity_count; i++) territory_alive[i] = world.is_alive(i) ? 1 : 0;
+            g_game_state.update_territory(world.transforms.position, (const uint8_t*)world.units.faction, territory_alive.data(), world.entity_count, dt);
+            g_game_state.update(dt);
+            if (g_game_state.check_victory()) g_game_state.phase = g_game_state.get_winner();
+        }
+
+        // === Physics ===
+        world.tick_corpses(dt);
+
+        // === Projectiles ===
+        renderer.projectiles.update(dt, s_terrain_height);
+
+        // Explosion particles + process hits
+        for (auto& hit : renderer.projectiles.pending_hits) {
+            if (hit.radius > 5.0f) {
+                bool is_nuke = hit.radius > 80.0f;
+                renderer.spawn_explosion_particles(hit.position, hit.radius, is_nuke);
+                if (is_nuke) audio.trigger_nuke();
+                else audio.trigger_cannon();
+            } else {
+                audio.trigger_arrow();
+            }
+        }
+
+        // Combat hit particles
+        for (uint32_t i = ai_batch > 15000 ? ai_batch-15000 : 0;
+             i < ai_batch && i < world.entity_count; i += 50) {
+            if (world.is_alive(i) && world.units.state[i] == UnitState::Attacking &&
+                world.units.attack_cooldown[i] > 0.7f)
+                renderer.spawn_hit_particles(world.transforms.position[i], world.renders.color[i]);
+        }
+
+        renderer.update(dt);
+
+        // Audio: intensity based on combat
+        float audio_intensity = 0;
+        if (combat->faction_alive[0] > 0 && combat->faction_alive[1] > 0) {
+            // Higher intensity when armies are close
+            float center_dist = glm::length(combat->faction_center[0] - combat->faction_center[1]);
+            audio_intensity = glm::clamp(1.0f - center_dist / 800.0f, 0.0f, 1.0f);
+        }
+        audio.update(dt, audio_intensity);
+
+        // === HUD stats ===
+        int sel=0, sel_inf=0, sel_cav=0, sel_arc=0;
+        for (uint32_t i = 0; i < world.entity_count; i++) {
+            if (world.selection.selected[i] && world.is_alive(i)) {
+                sel++;
+                switch(world.units.type[i]) {
+                    case UnitType::Infantry: sel_inf++; break;
+                    case UnitType::Cavalry: sel_cav++; break;
+                    case UnitType::Archer: sel_arc++; break;
+                    default: break;
+                }
+            }
+        }
+        hud.selected_count = sel;
+        hud.selected_infantry = sel_inf;
+        hud.selected_cavalry = sel_cav;
+        hud.selected_archer = sel_arc;
+        hud.red_alive = combat->faction_alive[0];
+        hud.blue_alive = combat->faction_alive[1];
+        hud.total_units = (int)world.entity_count;
+        hud.screen_w = g_screen_w;
+        hud.screen_h = g_screen_h;
+        hud.score = world.score[0];
+        hud.nuke_cost = world.nuke_cost;
+        hud.nuke_ready = world.nuke_ready[0];
+
+        } // end sim_active
+        // === Render ===
+        glViewport(0, 0, g_screen_w, g_screen_h);
+        float aspect = (float)g_screen_w / (float)g_screen_h;
+        glm::mat4 view = g_camera.get_view();
+        glm::mat4 proj = g_camera.get_projection(aspect);
+        if (g_game_state.phase == GamePhase::Playing) { renderer.render(world, view, proj, g_camera.get_position()); } else { glClearColor(0.05f, 0.05f, 0.1f, 1.0f); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); }
+
+        // Selection box
+        if (g_selecting) {
+            double smx, smy;
+            glfwGetCursorPos(window, &smx, &smy);
+            glm::vec2 s0 = {g_select_start.x/g_screen_w*2-1, 1-g_select_start.y/g_screen_h*2};
+            glm::vec2 s1 = {(float)smx/g_screen_w*2-1, 1-(float)smy/g_screen_h*2};
+            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            renderer.render_selection_box(glm::min(s0,s1), glm::max(s0,s1));
+            glDisable(GL_BLEND);
+            glDisable(GL_BLEND);
+        }
+
+        // HUD
+        hud.render();
+
+        // Territory bar + Shop Panel
+        if (g_game_state.phase == GamePhase::Playing) {
+            g_menu.screen_w = g_screen_w; g_menu.screen_h = g_screen_h;
+            g_menu.render_territory_bar(g_game_state);
+
+            // Clickable shop panel
+            double smx, smy; glfwGetCursorPos(window, &smx, &smy);
+            static const char* shop_names[] = {"Militia","Infantry","Archer","Shield","Cavalry","Bomber","Artillery","Wall","Turret"};
+            static int shop_costs[] = {50,100,200,150,300,500,250,350,100};
+            bool shop_click = (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS);
+            static bool prev_shop_click = false;
+            bool shop_clicked_now = shop_click && !prev_shop_click;
+            prev_shop_click = shop_click;
+            int shop_result = g_menu.render_shop_panel((float)smx, (float)smy, shop_clicked_now,
+                                                       shop_names, shop_costs, 9,
+                                                       world.money[0], g_buy_count);
+            if (shop_result >= 0) {
+                glm::vec2 spawn = g_game_state.rally_point;
+                int bought = world.buy_batch(shop_result, g_buy_count, spawn, Faction::Red);
+                if (bought > 0) { }
+            }
+        }
+
+
+        // Minimap
+        static std::vector<char> alive_flags;
+        alive_flags.resize(world.entity_count);
+        for (uint32_t i=0; i<world.entity_count; i++) alive_flags[i] = world.is_visible(i)?1:0;
+        hud.render_minimap_dots(world.transforms.position, world.renders.color,
+                                alive_flags.data(), world.entity_count, 1200.0f);
+
+
+        // === Menu / Map Select ===
+        if (g_game_state.phase == GamePhase::Menu) {
+            double mmx, mmy; glfwGetCursorPos(window, &mmx, &mmy);
+            g_menu.screen_w = g_screen_w; g_menu.screen_h = g_screen_h;
+            g_menu.render_main_menu(g_game_state, (float)mmx, (float)mmy);
+            static bool menu_was_pressed = false;
+            if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
+                if (!menu_was_pressed) {
+                    if (g_game_state.menu_hover == 0) {
+                        // Start battle with current map
+                        // MP_FORCE_MAP: in multiplayer every peer must build the SAME map.
+                        // Derive both the preset index and the terrain seed from the shared
+                        // network seed so all peers match regardless of local menu choice.
+                        uint32_t mp_seed = 0;
+                        if (net_state.isMultiplayer()) {
+                            net_state.waitForHandshake(8.0);
+                            mp_seed = (uint32_t)(net_state.terrainSeed() & 0xFFFFFFFFu);
+                            g_game_state.selected_map = (int)(mp_seed % 6);  // shared preset
+                        }
+                        renderer.terrain.apply_preset(g_game_state.selected_map);
+                        if (net_state.isMultiplayer()) {
+                            renderer.terrain.generate_with_seed(mp_seed);
+                            std::cout << "[Net] Battle map=" << g_game_state.selected_map
+                                      << " seed=" << mp_seed << "\n";
+                        } else {
+                            renderer.terrain.generate_with_seed(MAP_PRESETS[g_game_state.selected_map].seed);
+                        }
+                        // Reset world
+                        for (uint32_t i = 0; i < world.entity_count; i++) world.kill_entity(i);
+                        world.entity_count = 0;
+                        spawn_army(world, Faction::Red, {-400, 0}, 15000, {0.25f, 0.3f, 0.2f}, true);
+                        spawn_army(world, Faction::Blue, {400, 0}, 15000, {0.50f, 0.35f, 0.15f}, false);
+                        g_game_state.init_capture_points(g_game_state.selected_map);
+                        g_game_state.match_time = 0;
+                        g_game_state.victory_timer = 0;
+                        g_game_state.winning_faction = -1;
+                        combat->rebuild_grid(world);
+                        renderer.gpu_compute.upload_units(world);
+                        g_game_state.phase = GamePhase::Playing;
+                    } else if (g_game_state.menu_hover == 1) {
+                        g_game_state.phase = GamePhase::MapSelect;
+                    }
+                }
+                menu_was_pressed = true;
+            } else { menu_was_pressed = false; }
+        } else if (g_game_state.phase == GamePhase::MapSelect) {
+            double mmx, mmy; glfwGetCursorPos(window, &mmx, &mmy);
+            g_menu.screen_w = g_screen_w; g_menu.screen_h = g_screen_h;
+            g_menu.render_map_select(g_game_state, (float)mmx, (float)mmy);
+            static bool map_was_pressed = false;
+            if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
+                if (!map_was_pressed) {
+                    if (g_game_state.menu_hover >= 0 && g_game_state.menu_hover < MAP_COUNT)
+                        g_game_state.selected_map = g_game_state.menu_hover;
+                    else if (g_game_state.menu_hover == 100)
+                        g_game_state.phase = GamePhase::Playing;
+                }
+                map_was_pressed = true;
+            } else { map_was_pressed = false; }
+        }
+
+        // === End screen / Menu overlay ===
+        if (g_game_state.phase == GamePhase::Victory || g_game_state.phase == GamePhase::Defeat) {
+            double emx, emy; glfwGetCursorPos(window, &emx, &emy);
+            g_menu.screen_w = g_screen_w; g_menu.screen_h = g_screen_h;
+            g_menu.render_end_screen(g_game_state, g_game_state.phase == GamePhase::Victory, (float)emx, (float)emy);
+            if (g_mouse_clicked_this_frame && g_game_state.menu_hover == 0) {
+                g_game_state.phase = GamePhase::Playing;
+            }
+        }
+
+        glDisable(GL_BLEND);
+        glEnable(GL_DEPTH_TEST);
+        glfwSwapBuffers(window);
+    }
+
+    audio.cleanup();
+    hud.cleanup();
+    renderer.cleanup();
+    delete combat;
+    delete world_ptr;
+    glfwDestroyWindow(window);
+    glfwTerminate();
+    g_net_state = nullptr;
+    #ifdef _WIN32
+    UDPSocket::shutdown_network();
+    #endif
+    return 0;
+}

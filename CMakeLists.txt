@@ -51,6 +51,7 @@ list(FILTER CPU_SOURCES EXCLUDE REGEX "src/net/test_.*\.cpp$")
 list(FILTER CPU_SOURCES EXCLUDE REGEX "src/net/rts/example_usage\.cpp$")
 list(FILTER CPU_SOURCES EXCLUDE REGEX "src/net/voxel/.*\.cpp$")
 list(FILTER CPU_SOURCES EXCLUDE REGEX "src/main_sdfcraft\.cpp$")
+list(FILTER CPU_SOURCES EXCLUDE REGEX "src/main_planet\.cpp$")
 list(FILTER CPU_SOURCES EXCLUDE REGEX "src/sdfcraft/.*\.cpp$")
 
 # GPU target sources (exclude main.cpp, keep main_gpu.cpp)
@@ -61,6 +62,7 @@ list(FILTER GPU_SOURCES EXCLUDE REGEX "src/net/test_.*\.cpp$")
 list(FILTER GPU_SOURCES EXCLUDE REGEX "src/net/rts/example_usage\.cpp$")
 list(FILTER GPU_SOURCES EXCLUDE REGEX "src/net/voxel/.*\.cpp$")
 list(FILTER GPU_SOURCES EXCLUDE REGEX "src/main_sdfcraft\.cpp$")
+list(FILTER GPU_SOURCES EXCLUDE REGEX "src/main_planet\.cpp$")
 list(FILTER GPU_SOURCES EXCLUDE REGEX "src/sdfcraft/.*\.cpp$")
 
 # === CPU Target (original, stable) ===
@@ -204,3 +206,17 @@ endif()
 add_executable(test_sdfcraft src/sdfcraft/selftest.cpp)
 target_include_directories(test_sdfcraft PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_sdfcraft PRIVATE glm::glm)
+
+# === SDFCraft gameplay validator (real mesher + camera path, no GL) ===
+add_executable(validate_sdfcraft src/sdfcraft/gameplay_validator.cpp)
+target_include_directories(validate_sdfcraft PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(validate_sdfcraft PRIVATE glm::glm)
+
+
+# === SDFCraft real TCP EditTransport test (sockets, no GL) ===
+add_executable(test_net_transport src/sdfcraft/test_net_transport.cpp)
+target_include_directories(test_net_transport PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_net_transport PRIVATE glm::glm)
+if(WIN32)
+    target_link_libraries(test_net_transport PRIVATE ws2_32)
+endif()

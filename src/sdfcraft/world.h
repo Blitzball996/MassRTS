@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <vector>
 #include <array>
+#include <set>
 #include <algorithm>
 #include <unordered_map>
 #include <cmath>
@@ -27,6 +28,10 @@ static constexpr int CHUNK_SX = 16;   // blocks per chunk on X
 static constexpr int CHUNK_SZ = 16;   // blocks per chunk on Z
 static constexpr int CHUNK_SY = 128;  // world height (single vertical chunk)
 static constexpr float BLOCK_SIZE = 1.0f;
+
+// {x,y,z, oldBlockId} for each block a carve/edit flipped (shared by world_ops
+// and the net replicator; defined here so neither needs to include the other).
+using BlockFlips = std::vector<std::array<int,4>>;
 
 struct ChunkKey {
     int32_t cx, cz;
@@ -228,15 +233,29 @@ public:
             _hcache.h[iz * w + ix] = surface_height_f((float)(base_x + ix), (float)(base_z + iz));
     }
 
-    // Fast analytic SDF that uses the pre-warmed height cache. Falls back to full computation.
+    // Height lookup that is IDENTICAL whether or not the column is in the warm
+    // cache: in-range -> cached value, out-of-range -> recompute with the exact
+    // same surface_height_f() the cache was filled from. Using one formula
+    // everywhere is what keeps the isosurface continuous across chunk seams.
+    // (The previous version fell back to analytic_field(), a DIFFERENT float-coord
+    // formula, so the cached cells and the fallback cells disagreed at the cache
+    // boundary and tore the mesh — even in shallow layers.)
+    float cached_h(int wx, int wz) {
+        float h = _hcache.get(wx, wz);
+        if (h != HeightCache::MISS) return h;
+        return surface_height_f((float)wx, (float)wz);
+    }
+
+    // Fast analytic SDF that uses the pre-warmed height cache. Internally and at
+    // every chunk boundary it samples the SAME int-snapped height field, so the
+    // surface is fully continuous and matches what the mesher draws.
     float analytic_field_cached(float wx, float wy, float wz) {
-        float h  = _hcache.get((int)wx, (int)wz);
-        if (h == 0.0f) return analytic_field(wx, wy, wz); // fallback (shouldn't happen)
-        // gradient from cache (central differences, 1-unit step)
-        float hxp = _hcache.get((int)wx+1, (int)wz);
-        float hxm = _hcache.get((int)wx-1, (int)wz);
-        float hzp = _hcache.get((int)wx, (int)wz+1);
-        float hzm = _hcache.get((int)wx, (int)wz-1);
+        int ix = (int)std::floor(wx), iz = (int)std::floor(wz);
+        float h   = cached_h(ix,   iz);
+        float hxp = cached_h(ix+1, iz);
+        float hxm = cached_h(ix-1, iz);
+        float hzp = cached_h(ix,   iz+1);
+        float hzm = cached_h(ix,   iz-1);
         float gx = (hxp - hxm) * 0.5f, gz = (hzp - hzm) * 0.5f;
         float inv = 1.0f / std::sqrt(1.0f + gx*gx + gz*gz);
         return (wy - h) * inv;
@@ -333,6 +352,228 @@ public:
 
     std::unordered_map<ChunkKey, Chunk, ChunkKeyHash>& chunks() { return chunks_; }
 
+    // === Tree physics: check if LOG/LEAVES are floating, trigger gravity collapse ===
+    // When a tree block is broken, check connected tree blocks above for support.
+    // If unsupported (no path to ground), they fall and drop as items.
+    void check_tree_collapse(int wx, int wy, int wz, std::vector<std::array<int,4>>* drops = nullptr) {
+        // Flood-fill upward from the break point to find all connected LOG/LEAVES
+        std::vector<std::array<int,3>> to_check;
+        std::set<std::array<int,3>> visited;
+        std::vector<std::array<int,3>> floating;
+        
+        // Start from blocks above the broken one
+        for (int dy = 1; dy <= 16; dy++) {
+            int y = wy + dy;
+            if (y >= CHUNK_SY) break;
+            BlockId b = get_block(wx, y, wz);
+            if (b == BLOCK_LOG || b == BLOCK_LEAVES) {
+                to_check.push_back({wx, y, wz});
+                break;
+            }
+        }
+        
+        // BFS to find connected tree blocks
+        while (!to_check.empty()) {
+            auto [x, y, z] = to_check.back();
+            to_check.pop_back();
+            
+            if (visited.count({x, y, z})) continue;
+            visited.insert({x, y, z});
+            
+            BlockId b = get_block(x, y, z);
+            if (b != BLOCK_LOG && b != BLOCK_LEAVES) continue;
+            
+            floating.push_back({x, y, z});
+            
+            // Check 6 neighbors (3x3x3 for branches)
+            for (int dx = -1; dx <= 1; dx++)
+            for (int dy = -1; dy <= 1; dy++)
+            for (int dz = -1; dz <= 1; dz++) {
+                if (dx == 0 && dy == 0 && dz == 0) continue;
+                int nx = x + dx, ny = y + dy, nz = z + dz;
+                if (ny < 0 || ny >= CHUNK_SY) continue;
+                if (!visited.count({nx, ny, nz})) {
+                    BlockId nb = get_block(nx, ny, nz);
+                    if (nb == BLOCK_LOG || nb == BLOCK_LEAVES) {
+                        to_check.push_back({nx, ny, nz});
+                    }
+                }
+            }
+        }
+        
+        // Check if any floating block has ground support
+        bool has_support = false;
+        for (auto [x, y, z] : floating) {
+            // Check if this block connects to ground (non-tree solid block below)
+            for (int cy = y - 1; cy >= 0; cy--) {
+                BlockId below = get_block(x, cy, z);
+                if (below == BLOCK_LOG || below == BLOCK_LEAVES) continue;
+                if (below != BLOCK_AIR && below != BLOCK_WATER) {
+                    has_support = true;
+                    break;
+                }
+                break; // hit air/water, no support this column
+            }
+            if (has_support) break;
+        }
+        
+        // If no support, remove all floating blocks and drop them
+        if (!has_support && !floating.empty()) {
+            for (auto [x, y, z] : floating) {
+                BlockId b = get_block(x, y, z);
+                set_block(x, y, z, BLOCK_AIR);
+                if (drops) drops->push_back({x, y, z, (int)b});
+            }
+        }
+    }
+
+    // === Advanced terrain sculpting tools (MassRTS-style) ===
+    
+    // Raise terrain: push surface up smoothly
+    void raise_terrain(float cx, float cy, float cz, float radius, float strength) {
+        float reach = radius + 2.0f;
+        int x0 = (int)std::floor(cx - reach), x1 = (int)std::ceil(cx + reach);
+        int y0 = (int)std::floor(cy - reach), y1 = (int)std::ceil(cy + reach);
+        int z0 = (int)std::floor(cz - reach), z1 = (int)std::ceil(cz + reach);
+        
+        for (int wy = y0; wy <= y1; wy++) {
+            if (wy < 1 || wy >= CHUNK_SY - 1) continue;
+            for (int wz = z0; wz <= z1; wz++)
+            for (int wx = x0; wx <= x1; wx++) {
+                float dx = (wx - cx), dy = (wy - cy), dz = (wz - cz);
+                float dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+                if (dist > radius) continue;
+                
+                // Smooth falloff (cosine bell)
+                float falloff = 0.5f * (1.0f + std::cos(3.14159265f * (dist / radius)));
+                float offset = -strength * falloff; // negative = push into solid
+                
+                ChunkKey kk = world_to_chunk(wx, wz);
+                Chunk* c = get_chunk(kk, true);
+                int lx = floormod(wx, CHUNK_SX), lz = floormod(wz, CHUNK_SZ);
+                float cur = c->get_sdf(lx, wy, lz);
+                c->set_sdf(lx, wy, lz, cur + offset);
+                c->dirty_mesh = true; c->dirty_save = true;
+            }
+        }
+        for (int wz = z0; wz <= z1; wz++)
+        for (int wx = x0; wx <= x1; wx++) mark_dirty(world_to_chunk(wx, wz));
+    }
+    
+    // Smooth terrain: average nearby SDF values (reduces marching cubes artifacts)
+    void smooth_terrain(float cx, float cy, float cz, float radius, float strength) {
+        float reach = radius + 1.0f;
+        int x0 = (int)std::floor(cx - reach), x1 = (int)std::ceil(cx + reach);
+        int y0 = (int)std::floor(cy - reach), y1 = (int)std::ceil(cy + reach);
+        int z0 = (int)std::floor(cz - reach), z1 = (int)std::ceil(cz + reach);
+        
+        // Collect current SDF values first (avoid feedback)
+        struct Entry { int wx, wy, wz; float avg; };
+        std::vector<Entry> updates;
+        
+        for (int wy = y0; wy <= y1; wy++) {
+            if (wy < 1 || wy >= CHUNK_SY - 1) continue;
+            for (int wz = z0; wz <= z1; wz++)
+            for (int wx = x0; wx <= x1; wx++) {
+                float dx = (wx - cx), dy = (wy - cy), dz = (wz - cz);
+                float dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+                if (dist > radius) continue;
+                
+                // Average 26-neighbors (3x3x3 kernel) for better smoothing
+                float sum = 0.0f;
+                int cnt = 0;
+                for (int ddy = -1; ddy <= 1; ddy++)
+                for (int ddz = -1; ddz <= 1; ddz++)
+                for (int ddx = -1; ddx <= 1; ddx++) {
+                    sum += sdf_at(wx+ddx, wy+ddy, wz+ddz);
+                    cnt++;
+                }
+                float avg = sum / (float)cnt;
+                
+                float falloff = 0.5f * (1.0f + std::cos(3.14159265f * (dist / radius)));
+                updates.push_back({wx, wy, wz, avg * falloff * strength + sdf_at(wx,wy,wz) * (1.0f - falloff * strength)});
+            }
+        }
+        
+        // Apply updates
+        for (auto& e : updates) {
+            ChunkKey kk = world_to_chunk(e.wx, e.wz);
+            Chunk* c = get_chunk(kk, true);
+            int lx = floormod(e.wx, CHUNK_SX), lz = floormod(e.wz, CHUNK_SZ);
+            c->set_sdf(lx, e.wy, lz, e.avg);
+            c->dirty_mesh = true; c->dirty_save = true;
+        }
+        
+        for (int wz = z0; wz <= z1; wz++)
+        for (int wx = x0; wx <= x1; wx++) mark_dirty(world_to_chunk(wx, wz));
+    }
+    
+    // Flatten terrain: bring surface to target height
+    void flatten_terrain(float cx, float cy, float cz, float radius, float target_y, float strength) {
+        float reach = radius + 1.0f;
+        int x0 = (int)std::floor(cx - reach), x1 = (int)std::ceil(cx + reach);
+        int y0 = (int)std::floor(cy - reach), y1 = (int)std::ceil(cy + reach);
+        int z0 = (int)std::floor(cz - reach), z1 = (int)std::ceil(cz + reach);
+        
+        for (int wy = y0; wy <= y1; wy++) {
+            if (wy < 1 || wy >= CHUNK_SY - 1) continue;
+            for (int wz = z0; wz <= z1; wz++)
+            for (int wx = x0; wx <= x1; wx++) {
+                float dx = (wx - cx), dz = (wz - cz);
+                float dist_xz = std::sqrt(dx*dx + dz*dz);
+                if (dist_xz > radius) continue;
+                
+                float falloff = 0.5f * (1.0f + std::cos(3.14159265f * (dist_xz / radius)));
+                float target_sdf = (float)wy - target_y; // positive above target, negative below
+                
+                ChunkKey kk = world_to_chunk(wx, wz);
+                Chunk* c = get_chunk(kk, true);
+                int lx = floormod(wx, CHUNK_SX), lz = floormod(wz, CHUNK_SZ);
+                float cur = c->get_sdf(lx, wy, lz);
+                float blend = cur + (target_sdf - cur) * falloff * strength;
+                c->set_sdf(lx, wy, lz, blend);
+                c->dirty_mesh = true; c->dirty_save = true;
+            }
+        }
+        
+        for (int wz = z0; wz <= z1; wz++)
+        for (int wx = x0; wx <= x1; wx++) mark_dirty(world_to_chunk(wx, wz));
+    }
+    
+    // Boxify terrain: turn smooth SDF into sharp cubic forms (for dungeon rooms)
+    void boxify_terrain(float cx, float cy, float cz, float radius, float strength) {
+        float reach = radius + 1.0f;
+        int x0 = (int)std::floor(cx - reach), x1 = (int)std::ceil(cx + reach);
+        int y0 = (int)std::floor(cy - reach), y1 = (int)std::ceil(cy + reach);
+        int z0 = (int)std::floor(cz - reach), z1 = (int)std::ceil(cz + reach);
+        
+        for (int wy = y0; wy <= y1; wy++) {
+            if (wy < 1 || wy >= CHUNK_SY - 1) continue;
+            for (int wz = z0; wz <= z1; wz++)
+            for (int wx = x0; wx <= x1; wx++) {
+                float dx = (wx - cx), dy = (wy - cy), dz = (wz - cz);
+                float dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+                if (dist > radius) continue;
+                
+                ChunkKey kk = world_to_chunk(wx, wz);
+                Chunk* c = get_chunk(kk, true);
+                int lx = floormod(wx, CHUNK_SX), lz = floormod(wz, CHUNK_SZ);
+                float cur = c->get_sdf(lx, wy, lz);
+                
+                // Snap to nearest voxel center: quantize SDF to sharp grid
+                float snapped = (cur > 0.0f) ? std::ceil(cur) : std::floor(cur);
+                float falloff = 0.5f * (1.0f + std::cos(3.14159265f * (dist / radius)));
+                float blend = cur + (snapped - cur) * falloff * strength;
+                
+                c->set_sdf(lx, wy, lz, blend);
+                c->dirty_mesh = true; c->dirty_save = true;
+            }
+        }
+        
+        for (int wz = z0; wz <= z1; wz++)
+        for (int wx = x0; wx <= x1; wx++) mark_dirty(world_to_chunk(wx, wz));
+    }
+
 private:
     Noise noise_;
     std::unordered_map<ChunkKey, Chunk, ChunkKeyHash> chunks_;
@@ -344,9 +585,10 @@ private:
     struct HeightCache {
         int base_x=0, base_z=0, stride=0;
         std::vector<float> h;
+        static constexpr float MISS = -1e30f;   // out-of-range sentinel
         float get(int wx, int wz) const {
             int lx = wx - base_x, lz = wz - base_z;
-            if (lx < 0 || lz < 0 || lx >= stride || lz >= (int)h.size()/stride) return 0.0f;
+            if (lx < 0 || lz < 0 || lx >= stride || lz >= (int)h.size()/stride) return MISS;
             return h[lz * stride + lx];
         }
     };
@@ -363,10 +605,13 @@ private:
             for (int y = 0; y <= h; y++) {
                 BlockId b;
                 if (y == 0)                 b = BLOCK_BEDROCK;
-                else if (y < h - 4)         b = BLOCK_STONE;
-                else if (y < h)             b = (h <= sea_level + 1) ? BLOCK_SAND : BLOCK_DIRT;
+                // Geological depth layers (more realistic underground)
+                else if (y < 6)             b = BLOCK_STONE;  // deep stone
+                else if (y < h - 8)         b = BLOCK_STONE;  // stone layer
+                else if (y < h - 3)         b = (h <= sea_level + 1) ? BLOCK_SAND : BLOCK_DIRT;  // subsoil
+                else if (y < h)             b = (h <= sea_level + 1) ? BLOCK_SAND : BLOCK_DIRT;  // soil
                 else /* y == h, surface */  b = surface_block(wx, wz, h);
-                // ore pockets in stone
+                // ore pockets in deep stone
                 if (b == BLOCK_STONE) b = maybe_ore(wx, y, wz);
                 c.set(lx, y, lz, b);
             }
@@ -379,8 +624,11 @@ private:
     }
 
     BlockId surface_block(int wx, int wz, int h) {
-        if (h <= sea_level + 1) return BLOCK_SAND;
-        if (h > sea_level + 38) return BLOCK_SNOW;
+        // Mostly grass world (Minecraft-style green plains)
+        if (h <= sea_level) return BLOCK_SAND;  // underwater/beach only
+        if (h > sea_level + 42) return BLOCK_SNOW;  // high mountain peaks only
+        
+        // Everything else is grass (green world)
         return BLOCK_GRASS;
     }
 
@@ -395,42 +643,152 @@ private:
 
     void maybe_tree(Chunk& c, int lx, int lz, int wx, int wz, int h) {
         // keep trunks away from chunk borders so the (wider) canopy stays inside
-        if (lx < 4 || lx > CHUNK_SX - 5 || lz < 4 || lz > CHUNK_SZ - 5) return;
-        if (noise_.rand2(wx, wz) < 0.985f) return;
+        if (lx < 6 || lx > CHUNK_SX - 7 || lz < 6 || lz > CHUNK_SZ - 7) return;
+        // Snowy peaks above this height stay bare (treeline).
+        if (h > sea_level + 36) return;
+        float density = noise_.rand2(wx, wz);
+        if (density < 0.965f) return;   // forests (a touch denser than before)
 
-        // Varied oak: taller trunk + a full, layered rounded canopy. Tree size
-        // varies per-position so forests look natural (mix of short & tall).
-        float sz = noise_.rand2(wx + 99, wz - 99);
-        int trunk = 6 + (int)(sz * 5.0f);              // 6..10 tall
-        for (int i = 1; i <= trunk; i++) c.set(lx, h + i, lz, BLOCK_LOG);
-        int top = h + trunk;
+        // Per-tree random streams (deterministic from world position).
+        float r1 = noise_.rand2(wx + 99, wz - 99);
+        float r2 = noise_.rand2(wx - 51, wz + 71);
+        float r3 = noise_.rand2(wx + 17, wz + 233);
 
-        // Canopy: 5 layers from (top-3) up to (top+1), radius bulging in the
-        // lower-middle (broad, r=3) and tapering to the crown. Distance test
-        // fills every cell so the foliage is solid (no see-through hollow).
-        const int lo = -3, hi = 1;
-        for (int dy = lo; dy <= hi; dy++) {
-            int y = top + dy;
+        // Pick a species: pine on cold/high ground, bushy oak elsewhere, with an
+        // occasional tall "ancient" variant for skyline variety.
+        bool cold = (h > sea_level + 26);
+        if (cold || r3 > 0.82f) build_pine(c, lx, lz, h, r1, r2);
+        else                    build_oak(c, lx, lz, h, r1, r2, r3 > 0.6f);
+    }
+
+    // Rounded broadleaf oak: tapering trunk + a full 3D ellipsoid canopy. The
+    // canopy is sampled as a solid spheroid (no stacked-disk gaps) with a small
+    // per-voxel noise so the silhouette breaks up naturally instead of reading
+    // as a stepped blob.
+    // Voxel-style realistic oak: thick trunk (2x2 base), branches, detailed canopy
+    void build_oak(Chunk& c, int lx, int lz, int h, float r1, float r2, bool tall) {
+        int trunk_height = (tall ? 8 : 5) + (int)(r1 * 4.0f);     // 5..12
+        
+        // === Thick trunk (2x2 at base, tapering to 1x1) ===
+        int taper_point = trunk_height / 2;
+        for (int i = 1; i <= trunk_height; i++) {
+            if (i <= taper_point) {
+                // Thick base (2x2)
+                set_local(c, lx,   h + i, lz,   BLOCK_LOG);
+                set_local(c, lx+1, h + i, lz,   BLOCK_LOG);
+                set_local(c, lx,   h + i, lz+1, BLOCK_LOG);
+                set_local(c, lx+1, h + i, lz+1, BLOCK_LOG);
+            } else {
+                // Thin top (1x1)
+                set_local(c, lx, h + i, lz, BLOCK_LOG);
+            }
+        }
+        
+        int top = h + trunk_height;
+        
+        // === Add branches (horizontal LOG extensions) ===
+        int branch_start = top - 4;
+        if (branch_start < h + 3) branch_start = h + 3;
+        
+        // 4 main branches in cardinal directions
+        for (int b = 0; b < 4; b++) {
+            int branch_y = branch_start + (int)(r1 * 3.0f) + b;
+            if (branch_y > top - 1) branch_y = top - 1;
+            
+            int branch_len = 2 + (int)(r2 * 2.0f);  // 2..4 blocks
+            int dx = 0, dz = 0;
+            if (b == 0) dx = 1;       // +X
+            else if (b == 1) dx = -1; // -X
+            else if (b == 2) dz = 1;  // +Z
+            else dz = -1;             // -Z
+            
+            for (int i = 1; i <= branch_len; i++) {
+                set_local(c, lx + dx * i, branch_y, lz + dz * i, BLOCK_LOG);
+                // slight upward tilt
+                if (i == branch_len) set_local(c, lx + dx * i, branch_y + 1, lz + dz * i, BLOCK_LOG);
+            }
+        }
+        
+        // === Canopy (ellipsoid leaves around branches) ===
+        float leanx = (r2 > 0.66f) ? 1.0f : (r2 < 0.33f ? -1.0f : 0.0f);
+        float rx = (tall ? 5.0f : 4.0f) + r2 * 1.0f;  // wider canopy
+        float ry = (tall ? 4.0f : 3.5f) + r1 * 0.7f;
+        int   cy = top - 1;
+        int   ir = (int)std::ceil(std::max(rx, ry)) + 1;
+        
+        for (int dy = -ir; dy <= ir; dy++)
+        for (int dx = -ir; dx <= ir; dx++)
+        for (int dz = -ir; dz <= ir; dz++) {
+            int y = cy + dy;
             if (y < 0 || y >= CHUNK_SY) continue;
-            int r;
-            if      (dy <= -2) r = 2;      // bottom: broad
-            else if (dy == -1) r = 3;      // lower-mid: broadest
-            else if (dy ==  0) r = 2;      // upper-mid
-            else               r = 1;      // top: narrowing
-            float rr = (r + 0.4f) * (r + 0.4f);
-            for (int dx = -r; dx <= r; dx++)
-            for (int dz = -r; dz <= r; dz++) {
-                if (dx*dx + dz*dz > rr) continue;          // round the corners
+            float lean = leanx * ((float)(y - h) / (float)std::max(1, trunk_height)) * 1.2f;
+            int x = lx + dx + (int)std::lround(lean), z = lz + dz;
+            if (x < 0 || x >= CHUNK_SX || z < 0 || z >= CHUNK_SZ) continue;
+            
+            float fx = (float)dx / rx, fy = (float)dy / ry, fz = (float)dz / rx;
+            float d = fx*fx + fy*fy + fz*fz;
+            float n = noise_.rand2((x*131 + y*17), (z*57 + y*91)) * 0.24f;
+            
+            if (d > 1.0f + n - 0.08f) continue;
+            if (c.get(x, y, z) == BLOCK_AIR) c.set(x, y, z, BLOCK_LEAVES);
+        }
+    }
+
+    // Conifer pine: thicker trunk (2x2 base), dense stacked cone
+    void build_pine(Chunk& c, int lx, int lz, int h, float r1, float r2) {
+        int trunk_height = 8 + (int)(r1 * 6.0f);  // 8..14 tall
+        
+        // === Thick trunk (2x2 at base, tapering to 1x1) ===
+        int taper_point = trunk_height / 2;
+        for (int i = 1; i <= trunk_height; i++) {
+            if (i <= taper_point) {
+                // Thick base (2x2)
+                set_local(c, lx,   h + i, lz,   BLOCK_LOG);
+                set_local(c, lx+1, h + i, lz,   BLOCK_LOG);
+                set_local(c, lx,   h + i, lz+1, BLOCK_LOG);
+                set_local(c, lx+1, h + i, lz+1, BLOCK_LOG);
+            } else {
+                // Thin top (1x1)
+                set_local(c, lx, h + i, lz, BLOCK_LOG);
+            }
+        }
+        
+        // === Conical leaf layers ===
+        int base = h + 2 + (int)(r2 * 2.0f);  // first ring height
+        int topY = h + trunk_height;
+        float maxR = 3.8f;  // slightly wider
+        
+        for (int y = base; y <= topY; y++) {
+            float frac = (float)(y - base) / (float)std::max(1, topY - base);
+            float rad = (1.0f - frac) * maxR + 0.4f;  // smooth taper
+            float rr = rad * rad;
+            int ir = (int)std::ceil(rad);
+            
+            for (int dx = -ir; dx <= ir; dx++)
+            for (int dz = -ir; dz <= ir; dz++) {
+                float dd = (float)(dx*dx + dz*dz);
+                float n = noise_.rand2((lx+dx)*71 + y*13, (lz+dz)*29 + y*53) * 0.6f;
+                if (dd > rr + n) continue;
+                
                 int x = lx + dx, z = lz + dz;
                 if (x < 0 || x >= CHUNK_SX || z < 0 || z >= CHUNK_SZ) continue;
-                if (dx == 0 && dz == 0 && y <= top) continue;  // keep trunk visible
+                // Don't block the 2x2 trunk core
+                if ((dx == 0 || dx == 1) && (dz == 0 || dz == 1) && y <= h + taper_point) continue;
+                
                 if (c.get(x, y, z) == BLOCK_AIR) c.set(x, y, z, BLOCK_LEAVES);
             }
         }
-        // pointed leaf crown (2 caps) so the top isn't a flat disc
-        for (int k = 1; k <= 2; k++)
-            if (top + hi + k < CHUNK_SY && c.get(lx, top + hi + k, lz) == BLOCK_AIR)
-                c.set(lx, top + hi + k, lz, BLOCK_LEAVES);
+        
+        // Pointed crown
+        if (topY + 1 < CHUNK_SY) set_local(c, lx, topY + 1, lz, BLOCK_LEAVES);
+        if (topY     < CHUNK_SY) set_local(c, lx, topY,     lz, BLOCK_LEAVES);
+    }
+
+    // Set a block by chunk-local coords with bounds guard.
+    static void set_local(Chunk& c, int lx, int ly, int lz, BlockId b) {
+        if (lx < 0 || lx >= CHUNK_SX || lz < 0 || lz >= CHUNK_SZ) return;
+        if (ly < 0 || ly >= CHUNK_SY) return;
+        c.set(lx, ly, lz, b);
     }
 };
 

@@ -14,6 +14,8 @@
 
 #ifdef _WIN32
 #define NOMINMAX
+#include <winsock2.h>   // MUST precede windows.h to avoid sockaddr redefinition
+#include <ws2tcpip.h>
 #include <windows.h>
 #endif
 
@@ -29,6 +31,7 @@
 #include "game/game_state.h"
 #include "game/settlement_system.h"
 #include "ui/menu.h"
+#include "net/session.h"
 #define MINIAUDIO_IMPLEMENTATION
 #include "audio/audio_system.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -65,6 +68,17 @@ bool g_mouse_clicked_this_frame = false;
 // Shop state
 int g_shop_selection = -1; // -1 = no selection
 int g_buy_count = 1000; // buy in batches of 1000
+
+// --- Networking (lockstep listen-server) ---
+NetSession g_net;                  // inactive unless --host / --join
+bool  g_net_active = false;        // mirrors g_net.active()
+uint32_t g_sim_tick = 0;           // deterministic lockstep tick counter
+double g_net_accum = 0.0;          // fixed-step accumulator for net ticks
+
+// Reinterpret a float's bits as uint32 (and back) so carve params (y/radius)
+// ride inside NetCommand's integer fields without precision loss.
+static inline uint32_t f2u(float f){ uint32_t u; std::memcpy(&u,&f,4); return u; }
+static inline float    u2f(uint32_t u){ float f; std::memcpy(&f,&u,4); return f; }
 
 // --- Terrain sculpt state ---
 bool g_sculpt_mode = false;        // toggle with B
@@ -395,10 +409,25 @@ static bool g_shot_mode = false;
 static int  g_shot_warmup = 90; // frames to let terrain mesh/settle first
 
 int main(int argc, char* argv[]) {
+    // EARLY diagnostic: write to verify main() runs and file I/O works.
+    FILE* early = fopen("main_entry.txt", "w");
+    if (early) { fprintf(early, "main() entry argc=%d\n", argc); fclose(early); }
+    
     std::string exe_path = argv[0];
-    for (int ai = 1; ai < argc; ++ai) {
-        if (std::string(argv[ai]) == "--shots") g_shot_mode = true;
+    std::string net_mode;            // "host" or "join"
+    std::string net_ip = "127.0.0.1";
+    try {
+        for (int ai = 1; ai < argc; ++ai) {
+            std::string a = argv[ai];
+            if (a == "--shots") g_shot_mode = true;
+            else if (a == "--host") net_mode = "host";
+            else if (a == "--join") { net_mode = "join"; if (ai+1 < argc && argv[ai+1][0] != '-') net_ip = argv[++ai]; }
+        }
+    } catch (...) {
+        FILE* e=fopen("arg_crash.txt","w"); if(e){fprintf(e,"exception in arg loop\n");fclose(e);}
     }
+    // Diagnostic checkpoint 1: after arg parse, before GLFW init
+    { FILE* d=fopen("checkpoint1.txt","w"); if(d){fprintf(d,"args parsed net_mode=[%s]\n",net_mode.c_str());fclose(d);} }
     if (!glfwInit()) { fatal_error("GLFW failed"); return -1; }
 
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -489,8 +518,8 @@ int main(int argc, char* argv[]) {
         world.free_list.clear();
         world.live_count = 0;
         renderer.bases.reset({-550, 0}, {550, 0});
-        spawn_army(world, Faction::Red, {-550, 0}, 90000, {0.25f, 0.3f, 0.2f}, true);
-        spawn_army(world, Faction::Blue, {550, 0}, 90000, {0.50f, 0.35f, 0.15f}, false);
+        spawn_army(world, Faction::Red, {-550, 0}, 35000, {0.25f, 0.3f, 0.2f}, true);
+        spawn_army(world, Faction::Blue, {550, 0}, 35000, {0.50f, 0.35f, 0.15f}, false);
         g_game_state.init_capture_points(g_game_state.selected_map);
         g_game_state.match_time = 0;
         g_game_state.victory_timer = 0;
@@ -504,11 +533,64 @@ int main(int argc, char* argv[]) {
         g_game_state.phase = GamePhase::Playing;
     };
 
+    // --- Start networking session if requested ---
+    if (!net_mode.empty()) {
+        bool ok = (net_mode == "host") ? g_net.host(NET_PORT, "Host")
+                                       : g_net.join(net_ip.c_str(), NET_PORT, "Client");
+        g_net_active = ok;
+        // GUI apps have no console; log to a file so we can verify the session.
+        FILE* nl = fopen(net_mode == "host" ? "net_host.log" : "net_client.log", "w");
+        if (nl) {
+            fprintf(nl, "[Net] mode=%s ok=%d port=%d ip=%s faction=%d player=%d\n",
+                    net_mode.c_str(), ok?1:0, NET_PORT, net_ip.c_str(),
+                    (int)g_net.local_faction, (int)g_net.local_player);
+            fclose(nl);
+        }
+        std::cout << "[Net] " << net_mode << " ok=" << ok << "\n";
+    }
+    // Unconditional diagnostic: write args to a temp file to verify parsing.
+    {
+        FILE* diag = fopen("net_diag.txt", "w");
+        if (diag) {
+            fprintf(diag, "argc=%d net_mode=[%s] net_ip=[%s]\n", argc, net_mode.c_str(), net_ip.c_str());
+            for (int i = 0; i < argc; i++) fprintf(diag, "argv[%d]=%s\n", i, argv[i]);
+            fclose(diag);
+        }
+    }
+
     while (!glfwWindowShouldClose(window)) {
         double now = glfwGetTime();
         g_sim_step++;
         float dt = std::min((float)(now - last_time), 0.05f);
         last_time = now;
+
+        // --- Networking pump (receive/relay commands every frame) ---
+        if (g_net_active) g_net.poll();
+
+        // --- Lockstep tick: advance synced ticks at a fixed rate. Each player
+        // confirms an (empty or command-bearing) tick; once ALL confirm, we
+        // apply every player's commands for that tick in a deterministic order.
+        if (g_net_active) {
+            g_net_accum += dt;
+            const double NET_STEP = 1.0 / (double)NET_TICK_RATE;
+            int guard = 0;
+            while (g_net_accum >= NET_STEP && guard++ < 8) {
+                g_net_accum -= NET_STEP;
+                // Confirm this tick (no-op if we already queued real commands).
+                g_net.confirm_empty_tick(g_sim_tick);
+                if (!g_net.tick_ready(g_sim_tick)) { g_net_accum = 0; break; }
+                for (auto& c : g_net.commands_for(g_sim_tick)) {
+                    if (c.kind == CmdKind::Carve) {
+                        glm::vec3 ctr(c.target.x, u2f(c.param_a), c.target.y);
+                        float rad = u2f(c.param_b);
+                        bool dig = (c.unit_end == 0);
+                        renderer.carve_terrain(ctr, rad, dig);
+                    }
+                }
+                g_net.advance(g_sim_tick);
+                g_sim_tick++;
+            }
+        }
 
         frame_count++;
         fps_timer += dt;
@@ -562,12 +644,26 @@ int main(int argc, char* argv[]) {
             float str = g_sculpt_strength;
             int changed = (int)(cr * cr * 0.05f * str);
             switch (g_sculpt_brush) {
-                case 0: // Raise soil: add material as a dome sitting on the surface
-                    renderer.carve_terrain(glm::vec3(gp.x, gy + cr * 0.45f * str, gp.y), cr, false);
+                case 0: { // Raise soil: add material as a dome sitting on the surface
+                    glm::vec3 ctr(gp.x, gy + cr * 0.45f * str, gp.y);
+                    if (g_net_active) {
+                        g_net.queue_local_command(g_sim_tick, CmdKind::Carve, {ctr.x, ctr.z},
+                                                  0, 1, f2u(ctr.y), f2u(cr)); // unit_end=1: fill
+                    } else {
+                        renderer.carve_terrain(ctr, cr, false);
+                    }
                     break;
-                case 1: // Dig: shallow rounded bowl
-                    renderer.carve_terrain(glm::vec3(gp.x, gy - cr * 0.35f * str, gp.y), cr, true);
+                }
+                case 1: { // Dig: shallow rounded bowl
+                    glm::vec3 ctr(gp.x, gy - cr * 0.35f * str, gp.y);
+                    if (g_net_active) {
+                        g_net.queue_local_command(g_sim_tick, CmdKind::Carve, {ctr.x, ctr.z},
+                                                  0, 0, f2u(ctr.y), f2u(cr)); // unit_end=0: dig
+                    } else {
+                        renderer.carve_terrain(ctr, cr, true);
+                    }
                     break;
+                }
                 case 2: // Smooth: gentle fill that rounds off sharp features
                     renderer.smooth_terrain(glm::vec3(gp.x, gy, gp.y), cr);
                     changed /= 4;

@@ -1,0 +1,11 @@
+    std::string exe_path = argv[0];
+    std::string net_mode;            // "host" or "join"
+    std::string net_ip = "127.0.0.1";
+    for (int ai = 1; ai < argc; ++ai) {
+        std::string a = argv[ai];
+        if (a == "--shots") g_shot_mode = true;
+        else if (a == "--host") net_mode = "host";
+        else if (a == "--join") { net_mode = "join"; if (ai+1 < argc && argv[ai+1][0] != '-') net_ip = argv[++ai]; }
+    }
+    // Diagnostic checkpoint 1: after arg parse, before GLFW init
+    { FILE* d=fopen("checkpoint1.txt","w"); if(d){fprintf(d,"args parsed net_mode=[%s]\n",net_mode.c_str());fclose(d);} }

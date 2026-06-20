@@ -93,23 +93,25 @@ private:
     }
 
     // Emit one cube face (2 triangles) at integer block origin `o`.
-    static void emit_face(std::vector<float>& v, glm::vec3 o, int d, glm::vec3 col, float mat) {
+    static void emit_face(std::vector<float>& v, glm::vec3 o, int dir, glm::vec3 col, float mat) {
         // 8 cube corners (block occupies [o, o+1])
         glm::vec3 p000 = o + glm::vec3(0,0,0), p100 = o + glm::vec3(1,0,0);
         glm::vec3 p010 = o + glm::vec3(0,1,0), p110 = o + glm::vec3(1,1,0);
         glm::vec3 p001 = o + glm::vec3(0,0,1), p101 = o + glm::vec3(1,0,1);
         glm::vec3 p011 = o + glm::vec3(0,1,1), p111 = o + glm::vec3(1,1,1);
-        glm::vec3 n, a, b2, c2, dd;
-        switch (d) {
-            case 0: n={1,0,0};  a=p100;b2=p101;c2=p111;dd=p110; break; // +X
-            case 1: n={-1,0,0}; a=p001;b2=p000;c2=p010;dd=p011; break; // -X
-            case 2: n={0,1,0};  a=p010;b2=p110;c2=p111;dd=p011; break; // +Y
-            case 3: n={0,-1,0}; a=p001;b2=p101;c2=p100;dd=p000; break; // -Y
-            case 4: n={0,0,1};  a=p101;b2=p001;c2=p011;dd=p111; break; // +Z
-            default:n={0,0,-1}; a=p000;b2=p100;c2=p110;dd=p010; break; // -Z
+        // CCW winding (counter-clockwise when viewed from outside) to match GL_CCW front face.
+        // Each face is defined as two triangles with outward normal.
+        glm::vec3 n, a, b, c, d;
+        switch (dir) {
+            case 0: n={1,0,0};  a=p100;b=p110;c=p111;d=p101; break; // +X: reverse order
+            case 1: n={-1,0,0}; a=p000;b=p001;c=p011;d=p010; break; // -X: reverse order
+            case 2: n={0,1,0};  a=p010;b=p011;c=p111;d=p110; break; // +Y: reverse order
+            case 3: n={0,-1,0}; a=p000;b=p100;c=p101;d=p001; break; // -Y: reverse order
+            case 4: n={0,0,1};  a=p001;b=p101;c=p111;d=p011; break; // +Z: reverse order
+            default:n={0,0,-1}; a=p100;b=p000;c=p010;d=p110; break; // -Z: reverse order
         }
-        push_vert(v, a, n, col, mat); push_vert(v, b2, n, col, mat); push_vert(v, c2, n, col, mat);
-        push_vert(v, a, n, col, mat); push_vert(v, c2, n, col, mat); push_vert(v, dd, n, col, mat);
+        push_vert(v, a, n, col, mat); push_vert(v, b, n, col, mat); push_vert(v, c, n, col, mat);
+        push_vert(v, a, n, col, mat); push_vert(v, c, n, col, mat); push_vert(v, d, n, col, mat);
     }
 };
 

@@ -54,6 +54,8 @@ enum class CmdKind : uint8_t {
     Buy = 3,        // param_a = shop index, param_b = count
     Nuke = 4,       // target = impact point
     Rally = 5,
+    Carve = 6,      // SDF terrain carve: target=center.xz, param_a=bits(y),
+                    //                    param_b=bits(radius), unit_start=op(0 dig/1 fill)
 };
 
 #pragma pack(push, 1)

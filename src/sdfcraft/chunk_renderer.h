@@ -21,6 +21,9 @@
 #include <algorithm>
 #include <chrono>
 
+// stb_image already implemented in planet_renderer.h
+#include "../stb_image.h"
+
 namespace sdfcraft {
 
 class ChunkRenderer {
@@ -30,6 +33,19 @@ public:
         select_prog_ = load_program(shader_dir + "sdfcraft_select.vert", shader_dir + "sdfcraft_select.frag");
         if (!chunk_prog_ || !select_prog_) return false;
         init_select_box();
+        
+        // Load block textures (3DWorld assets)
+        tex_grass_      = load_texture("assets/textures/blocks/grass.png");
+        tex_dirt_       = load_texture("assets/textures/blocks/dirt.jpg");
+        tex_rock_       = load_texture("assets/textures/blocks/rock.png");
+        tex_rock2_      = load_texture("assets/textures/blocks/rock2.png");
+        tex_sand_       = load_texture("assets/textures/blocks/desert_sand.jpg");
+        tex_snow_       = load_texture("assets/textures/blocks/snow2.jpg");
+        tex_gravel_     = load_texture("assets/textures/blocks/gravel.jpg");
+        tex_mossy_rock_ = load_texture("assets/textures/blocks/mossy_rock.jpg");
+        tex_wood_       = load_texture("assets/textures/blocks/wood.jpg");
+        tex_bark_       = load_texture("assets/textures/blocks/bark.jpg");
+        
         return true;
     }
 
@@ -39,6 +55,11 @@ public:
         if (select_vao_) { glDeleteVertexArrays(1, &select_vao_); glDeleteBuffers(1, &select_vbo_); }
         if (chunk_prog_)  glDeleteProgram(chunk_prog_);
         if (select_prog_) glDeleteProgram(select_prog_);
+        
+        // Clean up textures
+        GLuint textures[] = {tex_grass_, tex_dirt_, tex_rock_, tex_rock2_, tex_sand_, 
+                             tex_snow_, tex_gravel_, tex_mossy_rock_, tex_wood_, tex_bark_};
+        glDeleteTextures(10, textures);
     }
 
     // Rebuild GPU meshes for any dirty/loaded chunks (bounded per frame).
@@ -100,10 +121,42 @@ public:
         glUniform3fv(glGetUniformLocation(chunk_prog_, "u_fog_color"), 1, &fog_color[0]);
         glUniform1f(glGetUniformLocation(chunk_prog_, "u_fog_start"), fog_start);
         glUniform1f(glGetUniformLocation(chunk_prog_, "u_fog_end"), fog_end);
+        
+        // Bind block textures (all materials use these)
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex_grass_);
+        glUniform1i(glGetUniformLocation(chunk_prog_, "u_tex_grass"), 0);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, tex_dirt_);
+        glUniform1i(glGetUniformLocation(chunk_prog_, "u_tex_dirt"), 1);
+        glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, tex_rock_);
+        glUniform1i(glGetUniformLocation(chunk_prog_, "u_tex_rock"), 2);
+        glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, tex_rock2_);
+        glUniform1i(glGetUniformLocation(chunk_prog_, "u_tex_rock2"), 3);
+        glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, tex_sand_);
+        glUniform1i(glGetUniformLocation(chunk_prog_, "u_tex_sand"), 4);
+        glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, tex_snow_);
+        glUniform1i(glGetUniformLocation(chunk_prog_, "u_tex_snow"), 5);
+        glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D, tex_gravel_);
+        glUniform1i(glGetUniformLocation(chunk_prog_, "u_tex_gravel"), 6);
+        glActiveTexture(GL_TEXTURE7); glBindTexture(GL_TEXTURE_2D, tex_mossy_rock_);
+        glUniform1i(glGetUniformLocation(chunk_prog_, "u_tex_mossy_rock"), 7);
+        glActiveTexture(GL_TEXTURE8); glBindTexture(GL_TEXTURE_2D, tex_wood_);
+        glUniform1i(glGetUniformLocation(chunk_prog_, "u_tex_wood"), 8);
+        glActiveTexture(GL_TEXTURE9); glBindTexture(GL_TEXTURE_2D, tex_bark_);
+        glUniform1i(glGetUniformLocation(chunk_prog_, "u_tex_bark"), 9);
 
         // opaque pass
         glUniform1f(glGetUniformLocation(chunk_prog_, "u_alpha"), 1.0f);
         glEnable(GL_DEPTH_TEST); glDisable(GL_BLEND);
+        // Draw the terrain double-sided. The Marching-Cubes corner layout is
+        // y-up while the edge/triangle tables are the standard z-up Bourke set,
+        // so a subset of the *complex* cube configurations (overhangs, caves,
+        // thin walls — exactly what carving a hole creates) come out with
+        // reversed winding and get backface-culled, leaving see-through
+        // "weird polygons" in dug-out areas. Vertex normals come from the SDF
+        // gradient (always outward), so disabling the cull renders both faces
+        // correctly with no shading penalty. Flat ground only hits the simple,
+        // correctly-wound cases, which is why it always looked fine with culling.
+        glDisable(GL_CULL_FACE);
         for (auto& kv : gpu_) {
             if (kv.second.opaque_count == 0) continue;
             glBindVertexArray(kv.second.opaque_vao);
@@ -119,6 +172,7 @@ public:
             glDrawArrays(GL_TRIANGLES, 0, kv.second.trans_count);
         }
         glDepthMask(GL_TRUE); glDisable(GL_BLEND);
+        glEnable(GL_CULL_FACE);   // restore (we disabled it for the terrain pass)
         glBindVertexArray(0);
     }
 
@@ -144,6 +198,11 @@ private:
     std::unordered_map<ChunkKey, Gpu, ChunkKeyHash> gpu_;
     GLuint chunk_prog_=0, select_prog_=0;
     GLuint select_vao_=0, select_vbo_=0;
+    
+    // Block textures (3DWorld assets for realistic terrain)
+    GLuint tex_grass_=0, tex_dirt_=0, tex_rock_=0, tex_rock2_=0, 
+           tex_sand_=0, tex_snow_=0, tex_gravel_=0, tex_mossy_rock_=0,
+           tex_wood_=0, tex_bark_=0;
 
     static void make_buffer(GLuint& vao, GLuint& vbo, const std::vector<float>& data) {
         if (!vao) glGenVertexArrays(1, &vao);
@@ -218,6 +277,33 @@ private:
         if (!ok) { char log[1024]; glGetProgramInfoLog(p, 1024, nullptr, log); std::cerr << "[sdfcraft] link error: " << log << "\n"; }
         glDeleteShader(v); glDeleteShader(f);
         return ok ? p : 0;
+    }
+    
+    // Load texture from disk (uses stb_image, same as planet_renderer)
+    static GLuint load_texture(const char* path) {
+        int w, h, ch;
+        stbi_set_flip_vertically_on_load(0);
+        unsigned char* data = stbi_load(path, &w, &h, &ch, 0);
+        if (!data) {
+            fprintf(stderr, "Failed to load block texture: %s\n", path);
+            return 0;
+        }
+        GLuint tex;
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        GLenum fmt = (ch == 3) ? GL_RGB : GL_RGBA;
+        glTexImage2D(GL_TEXTURE_2D, 0, fmt, w, h, 0, fmt, GL_UNSIGNED_BYTE, data);
+        glGenerateMipmap(GL_TEXTURE_2D);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        // Enable anisotropic filtering for crisp textures at oblique angles
+        float aniso = 0.0f;
+        glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY, &aniso);
+        glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY, std::min(aniso, 8.0f));
+        stbi_image_free(data);
+        return tex;
     }
 };
 

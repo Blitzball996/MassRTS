@@ -1,0 +1,116 @@
+===============================================================================
+立即操作清单 - MassRTS 网络多人游戏集成
+===============================================================================
+
+问题诊断：
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+你测试时"完全没有同步"的根本原因：
+  ✗ MassRTS.exe 编译于 01:26，而网络代码创建于 02:44
+  ✗ main.cpp 从未打过补丁（grep 确认为 0 处修改）
+  ✗ 你运行的 exe 里根本没有任何网络代码
+  ✗ --server / --client 参数完全被忽略
+
+已修正的问题：
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. ✓ net_integration.h 使用错误字段名
+   - 原: units.target_position (不存在)
+   - 改: commands.move_target + has_move_command (正确)
+
+2. ✓ 缺少 confirmEmptyTick 调用
+   - lockstep 每帧必须确认，否则死锁
+   - 已在 update() 中添加 horizon 确认循环
+
+3. ✓ 缺少固定步长逻辑
+   - 原: 每渲染帧推进 1 tick（帧率不同立刻 desync）
+   - 改: 30Hz 固定步长累加器，与渲染解耦
+
+4. ✓ 右键移动未 hook 网络
+   - apply_network_patch.py 现已添加注入逻辑
+
+必须执行的步骤：
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+步骤 1: 关闭 Visual Studio
+  当前状态: 2 个 devenv.exe 进程正在运行
+  → 完全退出 VS，否则 main.cpp/CMakeLists.txt 无法写入
+
+步骤 2: 应用补丁
+  cd G:\CMakePJ\MassRTS
+  python apply_network_patch.py
+
+  预期输出:
+    ✓ CMakeLists.txt patched
+    ✓ main.cpp patched
+    ✓ All patches applied successfully!
+
+步骤 3: 重新配置 CMake（排除测试文件）
+  cmake -B build
+  或打开 CMake GUI 重新 Configure
+
+步骤 4: 编译 Release
+  cmake --build build --config Release --target MassRTS
+
+  关键确认:
+    - 编译成功无错误
+    - 新的 MassRTS.exe 时间戳 > 当前时间
+    - 链接了所有 src/net/*.cpp（除了 test_*.cpp）
+
+步骤 5: 测试
+  方式 A - 自动启动全部:
+    cd build\Release
+    test_multiplayer.bat
+
+  方式 B - 手动逐个启动:
+    终端 1: MassRTS.exe --server --name "Host"
+    终端 2: MassRTS.exe --client 127.0.0.1 --name "Player1"
+    (等待2秒看连接信息)
+    终端 3: MassRTS.exe --client 127.0.0.1 --name "Player2"
+
+预期行为：
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✓ 服务器窗口输出: "[Net] Hosting on port 27015"
+✓ 客户端窗口输出: "[Net] Connected to 127.0.0.1:27015"
+✓ 控制台显示玩家 ID 分配 (player_id=0,1,2...)
+✓ 在任一窗口右键移动单位 → 其他窗口同步看到移动
+✓ 有 ~100ms 延迟（lockstep INPUT_DELAY=3 帧）
+✓ 敌方 AI 不购买单位（多人模式禁用）
+
+如果仍然不同步，诊断方法：
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. 检查编译输出是否包含 net/ 源文件
+   → 看到 rts_net_engine.cpp, socket.cpp, server.cpp 等
+
+2. 检查 exe 是否真的更新
+   dir build\Release\MassRTS.exe
+   → 时间戳必须是刚刚编译的
+
+3. 运行时加 --help 确认参数解析工作
+   MassRTS.exe --help
+   → 应显示 "MassRTS Multiplayer" 帮助信息
+
+4. 查看控制台输出
+   → 如果看不到 "[Net] ..." 说明网络初始化没执行
+
+5. 在 RtsNetEngine::queueLocalCommand 加断点
+   → 确认右键点击时真的调用了
+
+技术细节（如果需要调试）：
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- 协议: UDP lockstep, port 27015
+- Tick rate: 30Hz 固定步长
+- INPUT_DELAY: 3 ticks (100ms @ 30Hz)
+- 命令序列化: fixed16.16 坐标 + unit_id 范围
+- 同步模型: 所有玩家必须确认 tick T 才能推进
+- 空帧: 每个 tick 若无命令则发 confirmEmptyTick(Stop, unit_start=0xFFFFFFFF)
+
+文件清单：
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✓ src/net_integration.h          - 桥接层（已修正）
+✓ apply_network_patch.py         - 自动补丁脚本（已修正）
+✓ build/Release/*.bat            - 测试启动脚本
+✓ NETWORK_INTEGRATION_GUIDE.md   - 详细文档
+✓ INTEGRATION_COMPLETE.txt       - 总结报告
+
+===============================================================================
+现在操作：关闭 VS → python apply_network_patch.py → 重新编译 → 测试
+===============================================================================

@@ -62,6 +62,7 @@ public:
     GLuint particle_shader = 0, billboard_shader = 0, projectile_shader = 0;
     GLuint skinned_shader = 0;
     GLuint sky_shader = 0; GLuint sky_vao = 0; // procedural atmospheric sky
+    GLuint decor_shader = 0; // dedicated shader for trees/rocks/banners
     glm::vec3 sun_dir = glm::normalize(glm::vec3(0.4f, 0.85f, 0.3f)); // matches scene light dir
     SkinnedModel skinned_models[NUM_MESH_TYPES]; // optional GPU-skinned override per bucket
 
@@ -110,6 +111,7 @@ public:
         projectile_shader = load_shader(sd+"projectile.vert", sd+"projectile.frag");
         brush_shader = load_shader(sd+"brush.vert", sd+"brush.frag");
         sky_shader = load_shader(sd+"sky.vert", sd+"sky.frag");
+        decor_shader = load_shader(sd+"decor.vert", sd+"decor.frag");
         glGenVertexArrays(1, &sky_vao); // empty VAO; sky is a gl_VertexID triangle
         if (!unit_shader || !terrain_shader) return false;
 
@@ -327,13 +329,30 @@ public:
         // and combat keep querying get_height_at). Single surface, no z-fight.
         sdf_terrain.render();
 
-        // Decorations
+        // Decorations: trees/rocks/banners use a dedicated shader so they are
+        // shaded as vegetation/props instead of going through the humanoid
+        // unit shader (which would tint them like villager robes / armor).
+        if (decor_shader) {
+            glUseProgram(decor_shader);
+            glUniformMatrix4fv(glGetUniformLocation(decor_shader,"u_view"),1,GL_FALSE,&view[0][0]);
+            glUniformMatrix4fv(glGetUniformLocation(decor_shader,"u_proj"),1,GL_FALSE,&proj[0][0]);
+            glUniform1f(glGetUniformLocation(decor_shader,"u_time"), game_time);
+            decor.render(decor_shader);
+        } else {
+            glUseProgram(unit_shader);
+            glUniformMatrix4fv(glGetUniformLocation(unit_shader,"u_view"),1,GL_FALSE,&view[0][0]);
+            glUniform1f(glGetUniformLocation(unit_shader,"u_time"), game_time);
+            glUniformMatrix4fv(glGetUniformLocation(unit_shader,"u_proj"),1,GL_FALSE,&proj[0][0]);
+            glUniform1f(glGetUniformLocation(unit_shader,"u_model_scale"), 1.0f);
+            decor.render(unit_shader);
+        }
+
+        // Bases still use the unit shader
         glUseProgram(unit_shader);
         glUniformMatrix4fv(glGetUniformLocation(unit_shader,"u_view"),1,GL_FALSE,&view[0][0]);
         glUniform1f(glGetUniformLocation(unit_shader,"u_time"), game_time);
         glUniformMatrix4fv(glGetUniformLocation(unit_shader,"u_proj"),1,GL_FALSE,&proj[0][0]);
         glUniform1f(glGetUniformLocation(unit_shader,"u_model_scale"), 1.0f); // decor/bases use full scale
-        decor.render(unit_shader);
         bases.render(unit_shader);
 
         // Units (CPU instancing - reliable, GPU handles combat/movement only)
@@ -470,6 +489,7 @@ public:
         glDeleteProgram(unit_shader); glDeleteProgram(terrain_shader);
         glDeleteProgram(select_shader); glDeleteProgram(particle_shader);
         glDeleteProgram(billboard_shader); glDeleteProgram(projectile_shader);
+        if (decor_shader) glDeleteProgram(decor_shader);
     }
 
 private:
@@ -755,12 +775,13 @@ private:
         glDeleteShader(v); glDeleteShader(f); return p;
     }
 };
-// (end of renderer.h)                                                          
+// (end of renderer.h)
+/* stray duplicate tail removed:
               glAttachShader(p,f); glLinkProgram(p);
         int ok; glGetProgramiv(p,GL_LINK_STATUS,&ok);
-        if(!ok){char log[512]; glGetProgramInfoLog(p,512,0,log); std::cerr<<"Link: "<<log<<"\n"; return 0;}
+        if(!ok){char log[512]; glGetProgramInfoLog(p,512,0,log); return 0;}
         glDeleteShader(v); glDeleteShader(f); return p;
     }
-};
+*/
 // (end of renderer.h)                                                          
-              
+                                                                              

@@ -1320,6 +1320,24 @@ int main(int argc, char* argv[]) {
             glDisable(GL_BLEND);
         }
 
+        // Survival PREP preview: pulse warning rings where the NEXT wave's nests
+        // will erupt, so the player can place defenses / sculpt terrain there.
+        if (g_game_state.phase == GamePhase::Playing &&
+            g_game_state.mode == GameMode::Survival &&
+            g_wave_director.run_active &&
+            g_wave_director.phase == SurvivalPhase::Prep) {
+            static std::vector<glm::vec2> preview_nests;
+            g_wave_director.compute_nest_positions(g_wave_director.wave + 1, preview_nests);
+            float pulse = 0.55f + 0.45f * (float)sin(glfwGetTime() * 3.0);
+            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glm::vec3 warn(1.0f, 0.2f * pulse, 0.5f * pulse);
+            for (auto& np : preview_nests) {
+                renderer.render_brush_ring(view, proj, np, 70.0f + 30.0f * pulse, warn);
+                renderer.render_brush_ring(view, proj, np, 130.0f, glm::vec3(0.8f, 0.1f, 0.3f));
+            }
+            glDisable(GL_BLEND);
+        }
+
         // HUD — only during gameplay (Playing/Victory/Defeat). In Menu/MapSelect/
         // Settings/Loading the HUD top-bar + score panels would overlap the menu
         // and look like a "second menu".

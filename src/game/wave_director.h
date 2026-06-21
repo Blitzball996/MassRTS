@@ -206,6 +206,24 @@ public:
     // ===== wave start =====
     // Spawn the nests at the far edge (opposite the player base) and arm the
     // enemy budget for this wave. Units drip out of nests during Combat.
+    // Deterministic nest layout for wave `w`: an arc on the far side of the map
+    // from the base. Pure function of (w, base_pos, world_size) so the prep
+    // phase can preview the NEXT wave's nests before they actually spawn.
+    void compute_nest_positions(int w, std::vector<glm::vec2>& out) const {
+        out.clear();
+        int nn = num_nests_for_wave(w);
+        glm::vec2 dir = glm::length(base_pos) > 1.0f ? -glm::normalize(base_pos)
+                                                     : glm::vec2(1, 0);
+        float edge = world_size * 0.42f;
+        glm::vec2 center = dir * edge;
+        float spread = world_size * 0.30f;
+        glm::vec2 perp(-dir.y, dir.x);
+        for (int i = 0; i < nn; i++) {
+            float t = (nn == 1) ? 0.0f : ((float)i / (nn - 1) - 0.5f);
+            out.push_back(center + perp * (t * spread));
+        }
+    }
+
     void begin_wave(World& world) {
         wave++;
         phase = SurvivalPhase::Combat;
@@ -217,18 +235,11 @@ public:
 
         // Place nests in an arc on the far side of the map from the base.
         nests.clear();
-        int nn = num_nests_for_wave(wave);
-        glm::vec2 dir = glm::length(base_pos) > 1.0f ? -glm::normalize(base_pos)
-                                                     : glm::vec2(1, 0);
-        float edge = world_size * 0.42f;
-        glm::vec2 center = dir * edge;
-        float spread = world_size * 0.30f;
-        // perpendicular for the arc
-        glm::vec2 perp(-dir.y, dir.x);
-        for (int i = 0; i < nn; i++) {
-            float t = (nn == 1) ? 0.0f : ((float)i / (nn - 1) - 0.5f);
+        std::vector<glm::vec2> pos;
+        compute_nest_positions(wave, pos);
+        for (auto& p : pos) {
             Nest n;
-            n.pos = center + perp * (t * spread);
+            n.pos = p;
             n.max_health = n.health = 3000.0f + 600.0f * wave + 1500.0f * (difficulty_tier - 1);
             n.alive = true;
             n.spawn_accum = 0.0f;

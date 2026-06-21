@@ -16,6 +16,10 @@ if not exist build (
 )
 
 echo [*] Building Release (this can take a minute)...
+REM Kill any running instance first, else the linker can't overwrite the .exe
+REM (LNK1104) and you silently keep running the OLD build.
+taskkill /IM MassRTS_GPU.exe /F >nul 2>&1
+taskkill /IM MassRTS.exe /F >nul 2>&1
 cmake --build build --config Release --target MassRTS_GPU
 
 if errorlevel 1 (

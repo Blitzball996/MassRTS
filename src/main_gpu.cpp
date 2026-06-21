@@ -29,7 +29,9 @@
 #include "input/camera.h"
 #include "ui/hud.h"
 #include "game/game_state.h"
+#include "game/loading_manager.h"
 #include "game/settlement_system.h"
+#include "game/wave_director.h"
 #include "ui/menu.h"
 #include "net/session.h"
 #define MINIAUDIO_IMPLEMENTATION
@@ -61,8 +63,11 @@ Renderer* g_renderer = nullptr;
 bool g_nuke_targeting = false;
 // Game state machine
 GameState g_game_state;
+// Survival / roguelite wave director (only active when mode == Survival).
+WaveDirector g_wave_director;
 SettlementSystem g_settlements; // AI commanders: march -> settle -> build -> produce
 MenuRenderer g_menu;
+LoadingManager g_loader;
 bool g_mouse_clicked_this_frame = false;
 
 // Shop state
@@ -83,6 +88,10 @@ static inline float    u2f(uint32_t u){ float f; std::memcpy(&f,&u,4); return f;
 // --- Terrain sculpt state ---
 bool g_sculpt_mode = false;        // toggle with B
 bool g_victory_enabled = false;    // OFF: endless battle, no win/lose screen
+// Dynamic shallow-water sim. Disabled for now (the FluidSystem stays dormant:
+// it is never seeded/updated, so fluid.render()/update() early-out on !enabled).
+// Flip to true to bring the dynamic water back.
+bool g_dynamic_water = false;
 int  g_sculpt_brush = 1;           // 0=Raise 1=Dig 2=Smooth 3=Flatten
 float g_sculpt_radius = 60.0f;     // world units
 float g_sculpt_strength = 0.15f;   // brush strength 0.05..1.0, gentle default; , / . to tune
@@ -96,6 +105,34 @@ void fatal_error(const char* msg) {
 #ifdef _WIN32
     MessageBoxA(NULL, msg, "MassRTS Error", MB_OK | MB_ICONERROR);
 #endif
+}
+
+// Toggle between fullscreen (borderless on primary monitor) and windowed mode
+// at the resolution chosen in settings. Called when the user flips the toggle.
+void apply_fullscreen(GLFWwindow* window, GameState& state) {
+    static int saved_x = 100, saved_y = 100;
+    if (state.settings_fullscreen) {
+        // BORDERLESS WINDOWED fullscreen (not exclusive). We keep the monitor
+        // arg as nullptr and just size/position a decoration-less window to fill
+        // the primary monitor. Exclusive fullscreen (glfwSetWindowMonitor with a
+        // real monitor) grabs the display and stays always-on-top, which blocks
+        // the Windows Start menu / Win key and Alt-Tab overlays — especially
+        // annoying during the loading screen. Borderless lets the OS draw its
+        // shell over us normally while still looking fullscreen.
+        glfwGetWindowPos(window, &saved_x, &saved_y);
+        GLFWmonitor* mon = glfwGetPrimaryMonitor();
+        const GLFWvidmode* mode = glfwGetVideoMode(mon);
+        int mx = 0, my = 0;
+        glfwGetMonitorPos(mon, &mx, &my);
+        glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_FALSE);
+        glfwSetWindowAttrib(window, GLFW_FLOATING, GLFW_FALSE);
+        glfwSetWindowMonitor(window, nullptr, mx, my, mode->width, mode->height, 0);
+    } else {
+        glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_TRUE);
+        glfwSetWindowMonitor(window, nullptr, saved_x, saved_y,
+                             state.settings_resolution_w, state.settings_resolution_h, 0);
+    }
+    glfwSwapInterval(state.settings_vsync ? 1 : 0);
 }
 
 void scroll_callback(GLFWwindow* w, double x, double y) {
@@ -416,10 +453,12 @@ int main(int argc, char* argv[]) {
     std::string exe_path = argv[0];
     std::string net_mode;            // "host" or "join"
     std::string net_ip = "127.0.0.1";
+    bool auto_survival = false;       // --survival: auto-start a survival run
     try {
         for (int ai = 1; ai < argc; ++ai) {
             std::string a = argv[ai];
             if (a == "--shots") g_shot_mode = true;
+            else if (a == "--survival") auto_survival = true;
             else if (a == "--host") net_mode = "host";
             else if (a == "--join") { net_mode = "join"; if (ai+1 < argc && argv[ai+1][0] != '-') net_ip = argv[++ai]; }
         }
@@ -435,6 +474,12 @@ int main(int argc, char* argv[]) {
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_CONTEXT_ROBUSTNESS, GLFW_LOSE_CONTEXT_ON_RESET);
     glfwWindowHint(GLFW_SAMPLES, 4);
+    // Create the window HIDDEN. All the heavy GL init below (shader compiles,
+    // World allocation, FBO/postfx setup) happens before the first frame is
+    // drawn; if the window were visible it would show as a black rectangle for
+    // that whole time. We reveal it (glfwShowWindow) only after the first menu
+    // frame is rendered, so the player sees the menu immediately, never black.
+    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
 
     GLFWwindow* window = glfwCreateWindow(1600, 900, "MassRTS 3D", nullptr, nullptr);
     if (!window) { fatal_error("Window failed"); glfwTerminate(); return -1; }
@@ -444,6 +489,9 @@ int main(int argc, char* argv[]) {
     glfwSetMouseButtonCallback(window, mouse_button_callback);
     glfwSetKeyCallback(window, key_callback);
     glfwSwapInterval(1);
+
+    // Apply user's fullscreen/resolution preference on startup (defaults to fullscreen)
+    apply_fullscreen(window, g_game_state);
 
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) { fatal_error("GLAD failed"); return -1; }
     glEnable(GL_MULTISAMPLE);
@@ -477,12 +525,15 @@ int main(int argc, char* argv[]) {
 
     AudioSystem audio;
     audio.init();
+    // Sync the audio buses to the saved settings, then start the menu track.
+    audio.set_volumes(g_game_state.settings_master_volume, 0.6f,
+                      g_game_state.settings_sfx_volume);
+    audio.play_music(0); // menu music (no-op if assets/audio/music_menu.* absent)
 
-    std::cout << "Deploying armies...\n";
-    spawn_army(world, Faction::Red, {-550, 0}, 35000, {0.25f, 0.3f, 0.2f}, true);
-    spawn_army(world, Faction::Blue, {550, 0}, 35000, {0.50f, 0.35f, 0.15f}, false);
+    // DON'T spawn armies here — that blocks the main menu from showing.
+    // Armies are spawned inside start_battle() when the player clicks START.
     g_game_state.init_capture_points(g_game_state.selected_map);
-    g_game_state.phase = GamePhase::Playing;
+    g_game_state.phase = GamePhase::Menu;
     std::cout << "Deployed " << world.entity_count << " units\n";
     std::cout << "Controls: 1-9=Buy units, +/-=batch size, N=Nuke(click target), RMB=Move\n";
     std::cout << "Camera: WASD=Pan, Q/E=Rotate, R/F=Rise/Sink, MMB-drag=Orbit(tilt up to look out of craters), Scroll=Zoom\n";
@@ -493,6 +544,11 @@ int main(int argc, char* argv[]) {
 
     double last_time = glfwGetTime();
     int frame_count = 0;
+
+    // Where the Settings screen returns when you back out of it: the main menu
+    // (when opened from the title screen) or the Pause overlay (when opened
+    // mid-battle via ESC -> Pause -> Settings).
+    GamePhase settings_return = GamePhase::Menu;
     double fps_timer = 0;
     double tm_grid=0, tm_upload=0, tm_dispatch=0, tm_readback=0, tm_cpu=0; // profiling
     uint32_t ai_batch = 0;
@@ -506,31 +562,93 @@ int main(int argc, char* argv[]) {
     // Shared "start / restart battle with the selected map" routine. Used by both
     // the main-menu Start button AND the Map Select confirm button, so changing
     // the map actually regenerates terrain + re-uploads it to the GPU + respawns.
+    // ASYNC LOADING: start_battle now kicks off CPU world-gen on a background
+    // thread and switches to the Loading phase. The main loop shows a progress
+    // bar; when the CPU work finishes, finalize_battle() (main thread) runs the
+    // GL uploads and switches to Playing. This stops the multi-second freeze.
     auto start_battle = [&]() {
-        renderer.terrain.apply_preset(g_game_state.selected_map);
-        renderer.terrain.generate_with_seed(MAP_PRESETS[g_game_state.selected_map].seed);
-        renderer.gpu_compute.upload_heightmap(renderer.terrain);
-        renderer.sdf_terrain.cleanup();
-        renderer.sdf_terrain.init(&renderer.terrain, 6000.0f);
-        renderer.decor.generate(6000.0f, [&](float x, float z){ return renderer.terrain.get_height_at(x, z); });
-        for (uint32_t i = 0; i < world.entity_count; i++) world.kill_entity(i);
-        world.entity_count = 0;
-        world.free_list.clear();
-        world.live_count = 0;
-        renderer.bases.reset({-550, 0}, {550, 0});
-        spawn_army(world, Faction::Red, {-550, 0}, 35000, {0.25f, 0.3f, 0.2f}, true);
-        spawn_army(world, Faction::Blue, {550, 0}, 35000, {0.50f, 0.35f, 0.15f}, false);
-        g_game_state.init_capture_points(g_game_state.selected_map);
-        g_game_state.match_time = 0;
-        g_game_state.victory_timer = 0;
-        g_game_state.winning_faction = -1;
-        // AI commanders: each faction marches a vanguard out, plants an HQ,
-        // builds a barracks, and the barracks produces reinforcements.
-        g_settlements.height_fn = &s_terrain_height;
-        g_settlements.init({-550, 0}, {550, 0});
+        g_game_state.phase = GamePhase::Loading;
+        g_loader.start([&](LoadingManager& L) {
+            L.set(0.05f, "GENERATING TERRAIN");
+            renderer.terrain.apply_preset(g_game_state.selected_map);
+            renderer.terrain.generate_with_seed(MAP_PRESETS[g_game_state.selected_map].seed);
+
+            L.set(0.30f, "PLACING DECORATIONS");
+            renderer.decor.generate_cpu(6000.0f, [&](float x, float z){ return renderer.terrain.get_height_at(x, z); });
+
+            L.set(0.45f, "DEPLOYING ARMIES");
+            for (uint32_t i = 0; i < world.entity_count; i++) world.kill_entity(i);
+            world.entity_count = 0;
+            world.free_list.clear();
+            world.live_count = 0;
+            if (g_game_state.mode == GameMode::Survival) {
+                // Survival: only the player's starter defenders spawn here. The
+                // enemy swarm pours out of nests per-wave (WaveDirector). Give a
+                // modest garrison + starting metal so wave 1 is buildable.
+                spawn_army(world, Faction::Red, {-550, 0}, 800, {0.25f, 0.3f, 0.2f}, true);
+                world.money[0] = 800;
+                world.money[1] = 0;
+            } else {
+                spawn_army(world, Faction::Red, {-550, 0}, 35000, {0.25f, 0.3f, 0.2f}, true);
+                spawn_army(world, Faction::Blue, {550, 0}, 35000, {0.50f, 0.35f, 0.15f}, false);
+            }
+
+            L.set(0.55f, "PREPARING BATTLEFIELD");
+            g_game_state.init_capture_points(g_game_state.selected_map);
+            g_game_state.match_time = 0;
+            g_game_state.victory_timer = 0;
+            g_game_state.winning_faction = -1;
+            g_settlements.height_fn = &s_terrain_height;
+            g_settlements.init({-550, 0}, {550, 0});
+
+            L.set(0.65f, "BUILDING TERRAIN MESH");
+            // Heavy SDF voxel fill (CPU, ~900M samples) on the worker thread so
+            // the main thread stays responsive (loading screen keeps drawing).
+            renderer.sdf_terrain.init_cpu(&renderer.terrain, 6000.0f);
+            L.set(1.0f, "FINALIZING");
+        });
+    };
+
+
+    // Main-thread GL finalize after the background CPU work completes.
+    static bool battle_first_init = true;
+    auto finalize_battle = [&]() {
+        // Upload the CPU-built terrain mesh + decor instances to the GPU (these
+        // MUST be on the main thread — the worker only did the CPU assembly).
+        renderer.terrain.upload_mesh_gl();
+        renderer.decor.upload_gl();
+
+        if (battle_first_init) {
+            renderer.gpu_compute.init(renderer.shader_dir_cached, renderer.terrain);
+            renderer.bases.init({-550, 0}, {550, 0}, [&](float x, float z){ return renderer.terrain.get_height_at(x, z); });
+            renderer.sdf_terrain.init_gl(); // CPU fill already done on worker; just remesh+upload
+            if (g_dynamic_water) {
+                renderer.fluid.init(&renderer.terrain, renderer.water_shader);
+                renderer.fluid.seed_sea_level(8.0f); // flood natural basins at start
+            }
+            battle_first_init = false;
+        } else {
+            renderer.gpu_compute.upload_heightmap(renderer.terrain);
+            // Worker already refilled SDF chunks (init_cpu); just rebuild GL meshes.
+            renderer.sdf_terrain.init_gl();
+            renderer.bases.reset({-550, 0}, {550, 0});
+            if (g_dynamic_water) {
+                renderer.fluid.init(&renderer.terrain, renderer.water_shader);
+                renderer.fluid.seed_sea_level(8.0f);
+            }
+        }
         combat->rebuild_grid(world);
         renderer.gpu_compute.upload_units(world);
         g_game_state.phase = GamePhase::Playing;
+        // Survival: arm the wave director and open the first build window.
+        if (g_game_state.mode == GameMode::Survival) {
+            glm::vec2 base = renderer.bases.bases[0].position;
+            float wsize = MAP_PRESETS[g_game_state.selected_map].world_size;
+            g_wave_director.start_run(base, wsize, g_game_state.survival_seed,
+                                      g_game_state.survival_tier);
+            g_wave_director.begin_prep(world);
+        }
+        audio.play_music(1); // switch menu -> battle track
     };
 
     // --- Start networking session if requested ---
@@ -556,6 +674,38 @@ int main(int argc, char* argv[]) {
             for (int i = 0; i < argc; i++) fprintf(diag, "argv[%d]=%s\n", i, argv[i]);
             fclose(diag);
         }
+    }
+
+    // --survival: jump straight into a survival run (skips the menu click).
+    if (auto_survival) {
+        g_game_state.mode = GameMode::Survival;
+        start_battle();
+    }
+
+    // === Reveal the window with the menu already drawn ===
+    // Everything above (GL init, world alloc, audio, optional net handshake) is
+    // finished. Reveal the (already fullscreen-sized) window, sync the render
+    // targets to its REAL framebuffer size, then draw one menu frame and swap.
+    // The player's first sight of the window is the main menu at the correct
+    // size, never the black screen that used to show during the init above.
+    {
+        glfwShowWindow(window); // realizes the borderless-fullscreen framebuffer
+        // Query the ACTUAL framebuffer size (the window was created at 1600x900
+        // but apply_fullscreen() resized it to the monitor). The post-processing
+        // FBOs were built at 1600x900 in renderer.init(); on_resize() rebuilds
+        // them at the real size, otherwise the scene only fills a 1600x900 corner
+        // of the fullscreen backbuffer (the "window stuck in the bottom-left" bug).
+        glfwGetFramebufferSize(window, &g_screen_w, &g_screen_h);
+        if (g_screen_w <= 0) g_screen_w = 1600;
+        if (g_screen_h <= 0) g_screen_h = 900;
+        renderer.on_resize(g_screen_w, g_screen_h);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, g_screen_w, g_screen_h);
+        glClearColor(0.02f, 0.03f, 0.08f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        g_menu.screen_w = g_screen_w; g_menu.screen_h = g_screen_h;
+        g_menu.render_main_menu(g_game_state, -1.0f, -1.0f); // -1,-1: no hover yet
+        glfwSwapBuffers(window);
     }
 
     while (!glfwWindowShouldClose(window)) {
@@ -623,9 +773,53 @@ int main(int argc, char* argv[]) {
 
         glfwPollEvents();
         g_mouse_clicked_this_frame = false;
-        if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
-            glfwSetWindowShouldClose(window, true);
+        // ESC is context-sensitive (edge-triggered so it toggles, not repeats):
+        //   Playing            -> Pause (freeze battle, show pause overlay)
+        //   Paused             -> Resume
+        //   Settings           -> back to wherever Settings was opened from
+        //   MapSelect          -> back to main menu
+        //   Victory/Defeat     -> back to main menu (restore menu music)
+        //   Menu               -> quit the game
+        //   Loading            -> ignored (mid world-gen)
+        {
+            static bool esc_prev = false;
+            bool esc_now = (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS);
+            if (esc_now && !esc_prev) {
+                switch (g_game_state.phase) {
+                    case GamePhase::Playing:
+                        g_game_state.phase = GamePhase::Paused;
+                        break;
+                    case GamePhase::Paused:
+                        g_game_state.phase = GamePhase::Playing;
+                        break;
+                    case GamePhase::Settings:
+                        g_game_state.phase = settings_return;
+                        g_game_state.settings_submenu = 0;
+                        break;
+                    case GamePhase::MapSelect:
+                        g_game_state.phase = GamePhase::Menu;
+                        break;
+                    case GamePhase::Victory:
+                    case GamePhase::Defeat:
+                        g_game_state.phase = GamePhase::Menu;
+                        audio.play_music(0);
+                        break;
+                    case GamePhase::Menu:
+                        glfwSetWindowShouldClose(window, true);
+                        break;
+                    default: break; // Loading: ignore
+                }
+            }
+            esc_prev = esc_now;
+        }
+        // Track framebuffer size; when it changes (e.g. fullscreen toggle), the
+        // HDR/bloom render targets must be resized to match or the scene only
+        // fills a corner of the screen.
+        int prev_w = g_screen_w, prev_h = g_screen_h;
         glfwGetFramebufferSize(window, &g_screen_w, &g_screen_h);
+        if (g_screen_w != prev_w || g_screen_h != prev_h) {
+            renderer.on_resize(g_screen_w, g_screen_h);
+        }
         g_camera.update(window, dt);
 
         // --- Terrain sculpting (paint while LMB held in sculpt mode) ---
@@ -690,12 +884,22 @@ int main(int argc, char* argv[]) {
             world.money[0] = std::max(0, world.money[0] - cost);
         }
 
-        // === Economy ===
+        // === Economy === (only while actually playing — during Loading the
+        // worker thread owns the world arrays, so we must not touch them here)
+        if (g_game_state.phase == GamePhase::Playing) {
         world.tick_economy(dt);
+        // Survival run grants the roguelite income bonus on top of base income.
+        if (g_game_state.mode == GameMode::Survival && g_wave_director.m_income_bonus > 0.0f) {
+            static float surv_income_accum = 0.0f;
+            surv_income_accum += g_wave_director.m_income_bonus * dt;
+            if (surv_income_accum >= 1.0f) { int add=(int)surv_income_accum; world.money[0]+=add; surv_income_accum-=add; }
+        }
 
-        // Enemy auto-buy (every 8 seconds, buys mixed troops)
+        // Enemy auto-buy (every 8 seconds, buys mixed troops). Skirmish only —
+        // in Survival the WaveDirector owns all enemy spawning.
         enemy_buy_timer += dt;
-        if (enemy_buy_timer > 8.0f && combat->faction_alive[1] < 20000) {
+        if (g_game_state.mode == GameMode::Skirmish &&
+            enemy_buy_timer > 8.0f && combat->faction_alive[1] < 20000) {
             enemy_buy_timer = 0;
             int budget = world.money[1];
             // Buy mix: samurai, infantry, archers
@@ -724,6 +928,7 @@ int main(int argc, char* argv[]) {
                 if (bought == 0) break;
             }
         }
+        } // end Economy/auto-buy (Playing-only guard)
 
 
         // === Combat AI ===
@@ -860,19 +1065,64 @@ int main(int argc, char* argv[]) {
             for (int ci = start; ci < n; ci++) {
                 const auto& cr = world.carve_requests[ci];
                 renderer.carve_terrain(cr.center, cr.radius, cr.dig);
+                // Terrain-destruction <-> water coupling: re-sample the bed under
+                // the crater so water reacts next tick (craters fill, walls breach
+                // and flood), and inject a splash from the blast.
+                if (g_dynamic_water) {
+                    renderer.fluid.refresh_bed_region(cr.center.x, cr.center.z, cr.radius);
+                    if (cr.dig) renderer.fluid.add_splash(cr.center.x, cr.center.z, 2.5f);
+                }
             }
             world.carve_requests.clear();
         }
         renderer.flush_terrain_gpu(); // one batched GPU heightmap re-upload
 
+        // === Death decals: turn queued deaths into corpse + blood ground decals
+        if (!world.death_events.empty()) {
+            for (const auto& d : world.death_events) {
+                float gy = renderer.terrain.get_height_at(d.pos.x, d.pos.y);
+                renderer.corpses.spawn(d.pos, d.color, d.rotation, d.type, gy);
+            }
+            world.death_events.clear();
+        }
+
         // === Territory Control ===
-        if (g_game_state.phase == GamePhase::Playing) {
+        if (g_game_state.phase == GamePhase::Playing && g_game_state.mode == GameMode::Skirmish) {
             static std::vector<uint8_t> territory_alive;
             territory_alive.resize(world.entity_count);
             for (uint32_t i=0; i<world.entity_count; i++) territory_alive[i] = world.is_alive(i) ? 1 : 0;
             g_game_state.update_territory(world.transforms.position, (const uint8_t*)world.units.faction, territory_alive.data(), world.entity_count, dt);
             g_game_state.update(dt);
             if (g_victory_enabled && g_game_state.check_victory()) g_game_state.phase = g_game_state.get_winner();
+        }
+
+        // === Survival / Roguelite wave director ===
+        if (g_game_state.phase == GamePhase::Playing &&
+            g_game_state.mode == GameMode::Survival && g_wave_director.run_active) {
+            WaveDirector& wd = g_wave_director;
+            // Push roguelite multipliers into the ECS so purchases pick them up.
+            world.rl_player_hp_mult = wd.m_unit_hp;
+            world.rl_player_dmg_mult = wd.m_unit_damage;
+            world.rl_player_cost_mult = wd.m_unit_cost;
+            world.rl_kill_reward_mult = wd.m_kill_bounty;
+            // Base destroyed -> run over (survival always enforces this).
+            if (!renderer.bases.bases[0].alive) {
+                wd.run_active = false;
+                g_game_state.phase = GamePhase::Defeat;
+            } else if (wd.phase == SurvivalPhase::Prep) {
+                if (wd.tick_prep(dt)) wd.begin_wave(world);
+            } else if (wd.phase == SurvivalPhase::Combat) {
+                wd.sync_nests(world);
+                wd.tick_combat(world, dt, combat->faction_alive[1]);
+            }
+            // (Draft phase is handled by the UI/input block below.)
+            // Mirror state into GameState for the HUD.
+            int nlive = 0; for (auto& n : wd.nests) if (n.alive) nlive++;
+            g_game_state.hud_wave = wd.wave;
+            g_game_state.hud_phase = (int)wd.phase;
+            g_game_state.hud_prep_timer = wd.prep_timer;
+            g_game_state.hud_enemies_left = wd.enemies_remaining;
+            g_game_state.hud_nests_alive = nlive;
         }
 
         // === Physics ===
@@ -923,6 +1173,7 @@ int main(int argc, char* argv[]) {
         }
 
         renderer.update(dt);
+        if (g_dynamic_water) renderer.fluid.update(dt); // deterministic fixed-step shallow-water solve
 
         // Audio: intensity based on combat
         float audio_intensity = 0;
@@ -975,10 +1226,17 @@ int main(int argc, char* argv[]) {
         // The Victory/Defeat overlay draws ON TOP of the frozen battlefield so
         // the player sees the final battle state instead of a black screen.
         bool draw_world = (g_game_state.phase == GamePhase::Playing ||
+                           g_game_state.phase == GamePhase::Paused ||
                            g_game_state.phase == GamePhase::Victory ||
                            g_game_state.phase == GamePhase::Defeat);
         if (draw_world) { renderer.render(world, view, proj, g_camera.get_position()); }
-        else { glClearColor(0.05f, 0.05f, 0.1f, 1.0f); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); }
+        else {
+            // Menu / MapSelect / Settings / Loading: plain dark background.
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glViewport(0, 0, g_screen_w, g_screen_h);
+            glClearColor(0.02f, 0.03f, 0.08f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        }
 
         // Selection box
         if (g_selecting) {
@@ -1008,13 +1266,20 @@ int main(int argc, char* argv[]) {
             glDisable(GL_BLEND);
         }
 
-        // HUD
-        hud.render();
+        // HUD — only during gameplay (Playing/Victory/Defeat). In Menu/MapSelect/
+        // Settings/Loading the HUD top-bar + score panels would overlap the menu
+        // and look like a "second menu".
+        if (g_game_state.phase == GamePhase::Playing ||
+            g_game_state.phase == GamePhase::Victory ||
+            g_game_state.phase == GamePhase::Defeat) {
+            hud.render();
+        }
 
         // Territory bar + Shop Panel
         if (g_game_state.phase == GamePhase::Playing) {
             g_menu.screen_w = g_screen_w; g_menu.screen_h = g_screen_h;
-            g_menu.render_territory_bar(g_game_state);
+            if (g_game_state.mode == GameMode::Skirmish)
+                g_menu.render_territory_bar(g_game_state);
 
             // Clickable shop panel
             double smx, smy; glfwGetCursorPos(window, &smx, &smy);
@@ -1034,13 +1299,56 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // === Survival HUD banner + roguelite draft overlay ===
+        if (g_game_state.phase == GamePhase::Playing &&
+            g_game_state.mode == GameMode::Survival && g_wave_director.run_active) {
+            g_menu.screen_w = g_screen_w; g_menu.screen_h = g_screen_h;
+            WaveDirector& wd = g_wave_director;
+            g_menu.render_survival_banner(g_game_state.hud_wave, g_game_state.hud_phase,
+                                          g_game_state.hud_prep_timer,
+                                          g_game_state.hud_enemies_left,
+                                          g_game_state.hud_nests_alive,
+                                          wd.difficulty_tier);
+            // SPACE skips the prep window.
+            if (wd.phase == SurvivalPhase::Prep) {
+                static bool space_prev = false;
+                bool space_now = (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
+                if (space_now && !space_prev) wd.prep_skip = true;
+                space_prev = space_now;
+            }
+            // Draft: 3-choose-1 upgrade cards.
+            if (wd.phase == SurvivalPhase::Draft && wd.draft_ready) {
+                double dmx, dmy; glfwGetCursorPos(window, &dmx, &dmy);
+                const char* names[3]; const char* descs[3];
+                for (int i = 0; i < 3; i++) {
+                    names[i] = wd.draft_offer[i].name.c_str();
+                    descs[i] = wd.draft_offer[i].desc.c_str();
+                }
+                bool dclick = g_mouse_clicked_this_frame;
+                int pick = g_menu.render_draft((float)dmx, (float)dmy, dclick, names, descs);
+                if (pick >= 0) {
+                    audio.play_click();
+                    // BaseRepair card heals the base (director can't see BaseSystem).
+                    if (wd.draft_offer[pick].kind == ModKind::BaseRepair) {
+                        auto& b = renderer.bases.bases[0];
+                        b.health = std::min(b.max_health, b.health + wd.draft_offer[pick].value);
+                        b.alive = true;
+                    }
+                    wd.choose_card(world, pick);
+                }
+            }
+        }
 
-        // Minimap
-        static std::vector<char> alive_flags;
-        alive_flags.resize(world.entity_count);
-        for (uint32_t i=0; i<world.entity_count; i++) alive_flags[i] = world.is_visible(i)?1:0;
-        hud.render_minimap_dots(world.transforms.position, world.renders.color,
-                                alive_flags.data(), world.entity_count, 1200.0f);
+
+        // Minimap — skip during Loading: the worker thread is mutating the
+        // world arrays (spawn_army), so reading them here would race/crash.
+        if (g_game_state.phase != GamePhase::Loading && g_game_state.phase != GamePhase::Menu) {
+            static std::vector<char> alive_flags;
+            alive_flags.resize(world.entity_count);
+            for (uint32_t i=0; i<world.entity_count; i++) alive_flags[i] = world.is_visible(i)?1:0;
+            hud.render_minimap_dots(world.transforms.position, world.renders.color,
+                                    alive_flags.data(), world.entity_count, 1200.0f);
+        }
 
 
         // === Menu / Map Select ===
@@ -1052,9 +1360,20 @@ int main(int argc, char* argv[]) {
             if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
                 if (!menu_was_pressed) {
                     if (g_game_state.menu_hover == 0) {
+                        audio.play_click();
+                        g_game_state.mode = GameMode::Skirmish;
                         start_battle(); // start with currently-selected map
+                    } else if (g_game_state.menu_hover == 3) {
+                        audio.play_click();
+                        g_game_state.mode = GameMode::Survival;
+                        start_battle(); // survival run on the selected map
                     } else if (g_game_state.menu_hover == 1) {
+                        audio.play_click();
                         g_game_state.phase = GamePhase::MapSelect;
+                    } else if (g_game_state.menu_hover == 2) {
+                        audio.play_click();
+                        settings_return = GamePhase::Menu; // came from the title screen
+                        g_game_state.phase = GamePhase::Settings;
                     }
                 }
                 menu_was_pressed = true;
@@ -1066,13 +1385,151 @@ int main(int argc, char* argv[]) {
             static bool map_was_pressed = false;
             if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
                 if (!map_was_pressed) {
-                    if (g_game_state.menu_hover >= 0 && g_game_state.menu_hover < MAP_COUNT)
+                    if (g_game_state.menu_hover >= 0 && g_game_state.menu_hover < MAP_COUNT) {
+                        // Pick a map AND start the battle directly (async loading).
+                        audio.play_click();
                         g_game_state.selected_map = g_game_state.menu_hover;
-                    else if (g_game_state.menu_hover == 100)
-                        start_battle(); // regenerate terrain for the picked map + respawn
+                        start_battle();
+                    }
+                    else if (g_game_state.menu_hover == 100) {
+                        // START button: launch the currently-selected map.
+                        audio.play_click();
+                        start_battle();
+                    }
+                    else if (g_game_state.menu_hover == 101) {
+                        audio.play_click();
+                        audio.play_music(0); // back to menu track
+                        g_game_state.phase = GamePhase::Menu; // back to main menu
+                    }
                 }
                 map_was_pressed = true;
             } else { map_was_pressed = false; }
+        } else if (g_game_state.phase == GamePhase::Settings) {
+            // Countdown timer for settings confirmation
+            if (g_game_state.settings_confirming) {
+                g_game_state.settings_confirm_timer -= dt;
+                if (g_game_state.settings_confirm_timer <= 0) {
+                    // Timeout: revert settings
+                    g_game_state.restore_settings();
+                    apply_fullscreen(window, g_game_state);
+                    glfwSwapInterval(g_game_state.settings_vsync ? 1 : 0);
+                    renderer.postfx.enabled = g_game_state.settings_bloom;
+                    renderer.postfx.exposure = g_game_state.settings_exposure;
+                    g_game_state.settings_confirming = false;
+                    g_game_state.settings_dirty = false;
+                }
+            }
+
+            double smx, smy; glfwGetCursorPos(window, &smx, &smy);
+            g_menu.screen_w = g_screen_w; g_menu.screen_h = g_screen_h;
+            g_menu.render_settings(g_game_state, (float)smx, (float)smy);
+            static bool set_was_pressed = false;
+            static bool dragging_slider = false;
+            static int drag_id = -1;
+            if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
+                int hover = g_game_state.menu_hover;
+                if (!set_was_pressed) {
+                    // --- Navigation (category buttons + back) ---
+                    if (hover == 101) g_game_state.settings_submenu = 1;       // Video
+                    else if (hover == 102) g_game_state.settings_submenu = 2;  // Graphics
+                    else if (hover == 103) g_game_state.settings_submenu = 3;  // Audio
+                    else if (hover == 104) g_game_state.settings_submenu = 4;  // Controls
+                    else if (hover == 998) g_game_state.settings_submenu = 0;  // back to settings main
+                    else if (hover == 999) { // back to menu
+                        if (g_game_state.settings_dirty && !g_game_state.settings_confirming) {
+                            // Start confirmation countdown instead of instant exit
+                            g_game_state.snapshot_settings();
+                            g_game_state.settings_confirming = true;
+                            g_game_state.settings_confirm_timer = 15.0f;
+                        } else if (!g_game_state.settings_confirming) {
+                            g_game_state.phase = settings_return; // Menu or Paused
+                            g_game_state.settings_submenu = 0;
+                        }
+                    }
+                    // APPLY button
+                    else if (hover == 400 && g_game_state.settings_dirty) {
+                        g_game_state.snapshot_settings();
+                        g_game_state.settings_confirming = true;
+                        g_game_state.settings_confirm_timer = 15.0f;
+                    }
+                    // Confirmation: YES (keep changes)
+                    else if (hover == 401 && g_game_state.settings_confirming) {
+                        g_game_state.settings_confirming = false;
+                        g_game_state.settings_dirty = false; // changes accepted
+                    }
+                    // Confirmation: NO (revert)
+                    else if (hover == 402 && g_game_state.settings_confirming) {
+                        g_game_state.restore_settings();
+                        apply_fullscreen(window, g_game_state);
+                        glfwSwapInterval(g_game_state.settings_vsync ? 1 : 0);
+                        renderer.postfx.enabled = g_game_state.settings_bloom;
+                        renderer.postfx.exposure = g_game_state.settings_exposure;
+                        g_game_state.settings_confirming = false;
+                        g_game_state.settings_dirty = false;
+                    }
+                    // --- Toggles ---
+                    else if (hover == 301) { // fullscreen
+                        g_game_state.settings_fullscreen = !g_game_state.settings_fullscreen;
+                        apply_fullscreen(window, g_game_state);
+                        g_game_state.settings_dirty = true;
+                    }
+                    else if (hover == 302) { // vsync
+                        g_game_state.settings_vsync = !g_game_state.settings_vsync;
+                        glfwSwapInterval(g_game_state.settings_vsync ? 1 : 0);
+                        g_game_state.settings_dirty = true;
+                    }
+                    else if (hover == 310) { // bloom
+                        g_game_state.settings_bloom = !g_game_state.settings_bloom;
+                        renderer.postfx.enabled = g_game_state.settings_bloom;
+                        g_game_state.settings_dirty = true;
+                    }
+                    else if (hover == 331) { g_game_state.settings_edge_pan = !g_game_state.settings_edge_pan; g_game_state.settings_dirty = true; }
+                    // --- Sliders: start dragging ---
+                    else if (hover >= 300 && hover < 340) { dragging_slider = true; drag_id = hover; }
+                }
+                // Slider drag — slider track is at cx+30 .. cx+230 (sx=rx+180, rw=460, rx=cx-230)
+                if (dragging_slider) {
+                    float cx = g_screen_w * 0.5f;
+                    float sx = cx - 230.0f + 180.0f, sw = 200.0f;
+                    float frac = glm::clamp((float)(smx - sx) / sw, 0.0f, 1.0f);
+                    switch (drag_id) {
+                        case 311: g_game_state.settings_exposure = 0.3f + frac*1.7f; renderer.postfx.exposure = g_game_state.settings_exposure; break;
+                        case 312: g_game_state.settings_fov = 50.0f + frac*50.0f; break;
+                        case 313: g_game_state.settings_render_distance = 2000.0f + frac*6000.0f; break;
+                        case 314: g_game_state.settings_gamma = 0.5f + frac*1.5f; break;
+                        case 320: g_game_state.settings_master_volume = frac;
+                                  audio.set_volumes(g_game_state.settings_master_volume, 0.6f, g_game_state.settings_sfx_volume); break;
+                        case 321: g_game_state.settings_sfx_volume = frac;
+                                  audio.set_volumes(g_game_state.settings_master_volume, 0.6f, g_game_state.settings_sfx_volume); break;
+                        case 330: g_game_state.settings_camera_speed = 200.0f + frac*800.0f; break;
+                        case 300: { // resolution: snap to preset list
+                            static const int RES[][2] = {{1280,720},{1600,900},{1920,1080},{2560,1440},{3840,2160}};
+                            int idx = glm::clamp((int)(frac * 5.0f), 0, 4);
+                            g_game_state.settings_resolution_w = RES[idx][0];
+                            g_game_state.settings_resolution_h = RES[idx][1];
+                            break;
+                        }
+                    }
+                }
+                set_was_pressed = true;
+            } else {
+                if (dragging_slider) g_game_state.settings_dirty = true; // mark dirty on slider release
+                set_was_pressed = false;
+                dragging_slider = false;
+                drag_id = -1;
+            }
+        }
+
+        // === Loading screen (async world gen) ===
+        if (g_game_state.phase == GamePhase::Loading) {
+            g_menu.screen_w = g_screen_w; g_menu.screen_h = g_screen_h;
+            g_menu.render_loading(g_loader.get_progress(), g_loader.get_stage());
+            // When the background CPU work is done, run GL finalize on the main
+            // thread (GL calls can't happen on the worker thread).
+            if (g_loader.cpu_done() && !g_loader.finalized) {
+                g_loader.finalized = true;
+                finalize_battle();
+            }
         }
 
         // === End screen / Menu overlay ===
@@ -1087,6 +1544,35 @@ int main(int argc, char* argv[]) {
             if (g_mouse_clicked_this_frame && g_game_state.menu_hover == 0) {
                 g_game_state.phase = GamePhase::Playing;
             }
+        }
+
+        // === Pause overlay (ESC during a battle) ===
+        // Drawn over the frozen battlefield. Buttons: 10=Resume, 11=Settings,
+        // 12=Quit to Menu. Mouse is edge-detected so a single click acts once.
+        if (g_game_state.phase == GamePhase::Paused) {
+            double pmx, pmy; glfwGetCursorPos(window, &pmx, &pmy);
+            g_menu.screen_w = g_screen_w; g_menu.screen_h = g_screen_h;
+            glDisable(GL_DEPTH_TEST);
+            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            g_menu.render_pause_menu(g_game_state, (float)pmx, (float)pmy);
+            static bool pause_was_pressed = false;
+            if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
+                if (!pause_was_pressed) {
+                    if (g_game_state.menu_hover == 10) {          // Resume
+                        audio.play_click();
+                        g_game_state.phase = GamePhase::Playing;
+                    } else if (g_game_state.menu_hover == 11) {   // Settings
+                        audio.play_click();
+                        settings_return = GamePhase::Paused;      // come back to pause
+                        g_game_state.phase = GamePhase::Settings;
+                    } else if (g_game_state.menu_hover == 12) {   // Quit to Menu
+                        audio.play_click();
+                        audio.play_music(0);                      // menu track
+                        g_game_state.phase = GamePhase::Menu;
+                    }
+                }
+                pause_was_pressed = true;
+            } else { pause_was_pressed = false; }
         }
 
         glDisable(GL_BLEND);

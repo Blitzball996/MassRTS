@@ -32,6 +32,13 @@ public:
     // Bonus for player-controlled kills
     int player_kill_bonus = 5; // extra money for micro-managed kills
 
+    // Roguelite (Survival mode) multipliers. Default 1.0 = no effect, so
+    // Skirmish is unchanged. Set by WaveDirector when upgrade cards are drafted.
+    float rl_player_hp_mult = 1.0f;   // friendly HP scale on purchase
+    float rl_player_dmg_mult = 1.0f;  // friendly damage scale on purchase
+    float rl_player_cost_mult = 1.0f; // unit cost scale on purchase
+    float rl_kill_reward_mult = 1.0f; // metal per kill scale
+
     // Radiation zones
     struct RadZone { glm::vec2 center; float radius; float life; Faction owner; };
     std::vector<RadZone> rad_zones;
@@ -40,6 +47,13 @@ public:
     // as deterministic TerrainCarve events so every client carves identically.
     struct CarveRequest { glm::vec3 center; float radius; bool dig; };
     std::vector<CarveRequest> carve_requests;
+
+    // Death events queued by kill_entity; drained each frame by the render
+    // layer to spawn flat ground decals (corpse + blood). Decoupled from the
+    // ECS so the unit slot can recycle immediately at 190k scale while the
+    // corpse lingers visually as a cheap decal.
+    struct DeathEvent { glm::vec2 pos; glm::vec3 color; float rotation; uint8_t type; uint8_t faction; };
+    std::vector<DeathEvent> death_events;
 
     World() {
         alive.resize(MAX_ENTITIES, false);
@@ -79,12 +93,22 @@ public:
             score[killer_f]++;
             // Money reward based on unit value
             int reward = get_kill_reward(units.type[e]);
+            // Survival "scavengers" card boosts the player's (Red) kill metal.
+            if (killer_f == 0 && rl_kill_reward_mult != 1.0f)
+                reward = (int)(reward * rl_kill_reward_mult);
             money[killer_f] += reward;
             if (score[killer_f] >= nuke_cost) nuke_ready[killer_f] = true;
         }
         units.state[e] = UnitState::Dead;
         units.hit_timer[e] = 6.0f; // corpse linger (kept short so slots free up fast)
         transforms.velocity[e] = glm::vec2(0);
+        // Queue a persistent ground decal (corpse + blood) so the body remains
+        // visible after the ECS slot recycles. Structures don't leave corpses.
+        if (!units.is_structure[e]) {
+            death_events.push_back({ transforms.position[e], renders.color[e],
+                                     transforms.rotation[e], (uint8_t)units.type[e],
+                                     (uint8_t)units.faction[e] });
+        }
     }
 
     int get_kill_reward(UnitType type) {
@@ -167,11 +191,15 @@ public:
         if (shop_index < 0 || shop_index >= SHOP_COUNT) return INVALID_ENTITY;
         const auto& entry = UNIT_SHOP[shop_index];
         int f = (int)faction;
-        if (money[f] < entry.cost) return INVALID_ENTITY;
-        money[f] -= entry.cost;
+        int cost = entry.cost;
+        // Survival roguelite "cheaper units" card (player/Red only).
+        if (faction == Faction::Red && rl_player_cost_mult != 1.0f)
+            cost = std::max(1, (int)(cost * rl_player_cost_mult));
+        if (money[f] < cost) return INVALID_ENTITY;
+        money[f] -= cost;
 
         Entity e = create_entity();
-        if (e == INVALID_ENTITY) { money[f] += entry.cost; return INVALID_ENTITY; }
+        if (e == INVALID_ENTITY) { money[f] += cost; return INVALID_ENTITY; }
 
         transforms.position[e] = pos;
         transforms.velocity[e] = {0, 0};
@@ -181,9 +209,12 @@ public:
         units.faction[e] = faction;
         units.type[e] = entry.type;
         units.state[e] = UnitState::Idle;
-        units.health[e] = entry.hp;
-        units.max_health[e] = entry.hp;
-        units.attack_damage[e] = entry.dmg;
+        // Roguelite HP/damage buffs apply to the player's purchased units only.
+        float hp_mult = (faction == Faction::Red) ? rl_player_hp_mult : 1.0f;
+        float dmg_mult = (faction == Faction::Red) ? rl_player_dmg_mult : 1.0f;
+        units.health[e] = entry.hp * hp_mult;
+        units.max_health[e] = entry.hp * hp_mult;
+        units.attack_damage[e] = entry.dmg * dmg_mult;
         units.attack_range[e] = entry.range;
         units.speed[e] = entry.speed;
         units.attack_cooldown[e] = 0;

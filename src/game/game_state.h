@@ -6,8 +6,13 @@
 #include <algorithm>
 
 // Game State Machine: Menu -> MapSelect -> Playing -> Victory/Defeat
-enum class GamePhase { Menu, MapSelect, Playing, Victory, Defeat };
+// Paused: ESC during Playing freezes the battle and shows the pause overlay.
+// (Appended last so the existing enumerator values are unchanged.)
+enum class GamePhase { Menu, MapSelect, Settings, Loading, Playing, Victory, Defeat, Paused };
 
+// Which core loop the current match runs. Skirmish = classic Red-vs-Blue
+// territory battle. Survival = the endless wave / roguelite loop (ddd.txt).
+enum class GameMode { Skirmish = 0, Survival = 1 };
 // Map Presets
 struct MapPreset {
     const char* name;
@@ -54,6 +59,7 @@ public:
     bool needs_map_reload = false;
     int selected_map = 0;
     int menu_hover = -1;
+    int settings_submenu = 0;  // 0=main settings page, 1=Video, 2=Graphics, 3=Audio, 4=Controls
 
     // Territory control
     std::vector<CapturePoint> capture_points;
@@ -72,9 +78,43 @@ public:
     int shop_hover = -1;
     bool shop_panel_open = true;
 
+    // Settings (Graphics, Audio, Controls)
+    bool settings_bloom = true;
+    float settings_exposure = 0.7f;  // lowered from 0.85 (still too bright)
+    float settings_master_volume = 0.7f;
+    float settings_sfx_volume = 0.8f;
+    float settings_camera_speed = 600.0f;
+    bool settings_edge_pan = true;
+    
+    // Video settings (PC-specific)
+    int settings_resolution_w = 1920;
+    int settings_resolution_h = 1080;
+    bool settings_fullscreen = true;  // default fullscreen on startup
+    bool settings_dirty = false;       // true when user changed settings (shows APPLY)
+    bool settings_confirming = false;  // true during the 15s countdown
+    float settings_confirm_timer = 0;  // countdown timer
+    // Snapshot to restore if user declines/times out
+    struct { int w, h; bool fs, vsync, bloom, epan; float exp, fov, rng, gam, mvol, svol, cam; } settings_snapshot;
+    bool settings_vsync = true;
+    
+    // Graphics advanced (MinecraftConsoles-inspired)
+    float settings_fov = 75.0f;  // field of view in degrees
+    float settings_render_distance = 6000.0f;  // terrain draw distance
+    float settings_gamma = 1.0f;  // brightness adjustment
     // Match stats
     float match_time = 0;
     int total_kills[2] = {0, 0};
+
+    // === Mode selection / Survival run config ===
+    GameMode mode = GameMode::Skirmish;
+    int survival_tier = 1;       // difficulty tier chosen on the menu (1..5)
+    uint32_t survival_seed = 1337;
+    // HUD mirror of the live WaveDirector state (filled each frame in Playing).
+    int hud_wave = 0;
+    int hud_phase = 0;           // 0=Prep 1=Combat 2=Draft
+    float hud_prep_timer = 0;
+    int hud_enemies_left = 0;
+    int hud_nests_alive = 0;
 
     void init_capture_points(int map_idx) {
         capture_points.clear();
@@ -84,6 +124,29 @@ public:
         capture_points.push_back({{spread, 0}, 80.0f, 1, {0,100}, 100.0f, "East Outpost"});
         capture_points.push_back({{0, -spread*0.7f}, 80.0f, -1, {0,0}, 100.0f, "North Pass"});
         capture_points.push_back({{0, spread*0.7f}, 80.0f, -1, {0,0}, 100.0f, "South Ford"});
+    }
+
+    void snapshot_settings() {
+        settings_snapshot = {settings_resolution_w, settings_resolution_h, settings_fullscreen,
+                             settings_vsync, settings_bloom, settings_edge_pan, settings_exposure,
+                             settings_fov, settings_render_distance, settings_gamma,
+                             settings_master_volume, settings_sfx_volume, settings_camera_speed};
+    }
+
+    void restore_settings() {
+        settings_resolution_w = settings_snapshot.w;
+        settings_resolution_h = settings_snapshot.h;
+        settings_fullscreen = settings_snapshot.fs;
+        settings_vsync = settings_snapshot.vsync;
+        settings_bloom = settings_snapshot.bloom;
+        settings_edge_pan = settings_snapshot.epan;
+        settings_exposure = settings_snapshot.exp;
+        settings_fov = settings_snapshot.fov;
+        settings_render_distance = settings_snapshot.rng;
+        settings_gamma = settings_snapshot.gam;
+        settings_master_volume = settings_snapshot.mvol;
+        settings_sfx_volume = settings_snapshot.svol;
+        settings_camera_speed = settings_snapshot.cam;
     }
 
     void update_territory(const glm::vec2* positions, const uint8_t* factions,

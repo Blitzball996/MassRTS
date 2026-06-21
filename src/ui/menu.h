@@ -352,6 +352,48 @@ void main() { frag = u_color; }
         glBindVertexArray(0);
     }
 
+    // Survival run-over results screen. Shows this run's score and any newly
+    // unlocked content, with RETRY (same tier/new seed) and MENU buttons.
+    // Returns: 0 = none, 1 = RETRY, 2 = MENU.
+    int render_survival_results(float mx, float my, bool click,
+                                int wave_reached, int tier, int kills,
+                                int points_earned, int best_wave,
+                                int unlocked_tier, bool new_unlock,
+                                const char* unlock_text) {
+        begin_2d();
+        draw_rect(0, 0, (float)screen_w, (float)screen_h, {0.0f, 0.0f, 0.0f, 0.78f});
+        float cx = screen_w * 0.5f;
+
+        draw_text_centered("RUN OVER", cx, screen_h * 0.12f, 5.5f, {1.0f, 0.25f, 0.3f, 1.0f});
+
+        char buf[96];
+        snprintf(buf, sizeof(buf), "REACHED WAVE %d  -  TIER %d", wave_reached, tier);
+        draw_text_centered(buf, cx, screen_h * 0.26f, 3.0f, {1.0f, 0.7f, 0.4f, 1.0f});
+
+        float sy = screen_h * 0.36f;
+        snprintf(buf, sizeof(buf), "KILLS  %d", kills);
+        draw_text_centered(buf, cx, sy, 2.0f, {0.8f, 0.85f, 0.9f, 0.95f});
+        snprintf(buf, sizeof(buf), "META POINTS EARNED  +%d", points_earned);
+        draw_text_centered(buf, cx, sy + 34, 2.0f, {0.6f, 0.9f, 0.7f, 0.95f});
+        if (wave_reached >= best_wave) {
+            draw_text_centered("NEW BEST!", cx, sy + 70, 2.2f, {1.0f, 0.9f, 0.3f, 1.0f});
+        } else {
+            snprintf(buf, sizeof(buf), "BEST  WAVE %d", best_wave);
+            draw_text_centered(buf, cx, sy + 70, 1.8f, {0.6f, 0.6f, 0.7f, 0.9f});
+        }
+        if (new_unlock) {
+            draw_text_centered("UNLOCKED:", cx, sy + 116, 1.8f, {0.5f, 0.9f, 1.0f, 1.0f});
+            draw_text_centered(unlock_text, cx, sy + 146, 2.0f, {0.7f, 1.0f, 1.0f, 1.0f});
+        }
+
+        float by = screen_h * 0.78f;
+        int action = 0;
+        if (button_box(cx - 220, by, 200, 60, "RETRY", mx, my, click)) action = 1;
+        if (button_box(cx + 20, by, 200, 60, "MENU", mx, my, click)) action = 2;
+        end_2d();
+        return action;
+    }
+
     // ========================================================================
     // IN-GAME SHOP PANEL (Clickable buttons like Red Alert)
     // ========================================================================

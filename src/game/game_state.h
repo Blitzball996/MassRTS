@@ -110,6 +110,13 @@ public:
     int survival_tier = 1;       // difficulty tier chosen on the menu (1..5)
     uint32_t survival_seed = 1337;
     bool survival_setup_open = false; // tier/seed picker overlay shown over Menu
+    // Last-run summary (filled when a survival run ends, for the results screen).
+    int  last_run_wave = 0;
+    int  last_run_tier = 1;
+    int  last_run_kills = 0;
+    int  last_run_points = 0;
+    bool last_run_new_unlock = false;
+    char last_run_unlock_text[48] = {0};
     // HUD mirror of the live WaveDirector state (filled each frame in Playing).
     int hud_wave = 0;
     int hud_phase = 0;           // 0=Prep 1=Combat 2=Draft

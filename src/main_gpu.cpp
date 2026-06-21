@@ -1128,9 +1128,40 @@ int main(int argc, char* argv[]) {
                 g_game_state.phase = GamePhase::Defeat;
                 // Bank the run result once (unlocks, best wave/tier, meta points).
                 if (!g_meta_recorded) {
+                    // Snapshot unlock state to detect what (if anything) this run opened.
+                    int prev_tier = g_meta.unlocked_tier;
+                    bool prev_rich = g_meta.unlock_richstart;
+                    bool prev_vets = g_meta.unlock_veterans;
+                    bool prev_extra = g_meta.unlock_extracard;
                     // wd.wave is the wave we died on (>=1 once a wave started).
-                    g_meta.record_run(wd.wave, wd.difficulty_tier, world.score[0]);
+                    int earned = g_meta.record_run(wd.wave, wd.difficulty_tier, world.score[0]);
                     g_meta_recorded = true;
+
+                    // Fill the results-screen summary.
+                    GameState& gs = g_game_state;
+                    gs.last_run_wave = wd.wave;
+                    gs.last_run_tier = wd.difficulty_tier;
+                    gs.last_run_kills = world.score[0];
+                    gs.last_run_points = earned;
+                    gs.last_run_new_unlock = false;
+                    gs.last_run_unlock_text[0] = '\0';
+                    if (g_meta.unlocked_tier > prev_tier) {
+                        gs.last_run_new_unlock = true;
+                        snprintf(gs.last_run_unlock_text, sizeof(gs.last_run_unlock_text),
+                                 "DIFFICULTY TIER %d", g_meta.unlocked_tier);
+                    } else if (g_meta.unlock_richstart && !prev_rich) {
+                        gs.last_run_new_unlock = true;
+                        snprintf(gs.last_run_unlock_text, sizeof(gs.last_run_unlock_text),
+                                 "RICH START (+400 METAL)");
+                    } else if (g_meta.unlock_veterans && !prev_vets) {
+                        gs.last_run_new_unlock = true;
+                        snprintf(gs.last_run_unlock_text, sizeof(gs.last_run_unlock_text),
+                                 "VETERAN GARRISON");
+                    } else if (g_meta.unlock_extracard && !prev_extra) {
+                        gs.last_run_new_unlock = true;
+                        snprintf(gs.last_run_unlock_text, sizeof(gs.last_run_unlock_text),
+                                 "EXTRA DRAFT CARD");
+                    }
                 }
             } else if (wd.phase == SurvivalPhase::Prep) {
                 if (wd.tick_prep(dt)) wd.begin_wave(world);
@@ -1591,9 +1622,29 @@ int main(int argc, char* argv[]) {
             // battlefield, and must blend so its alpha works.
             glDisable(GL_DEPTH_TEST);
             glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            g_menu.render_end_screen(g_game_state, g_game_state.phase == GamePhase::Victory, (float)emx, (float)emy);
-            if (g_mouse_clicked_this_frame && g_game_state.menu_hover == 0) {
-                g_game_state.phase = GamePhase::Playing;
+            if (g_game_state.mode == GameMode::Survival) {
+                // Dedicated survival results screen with RETRY / MENU.
+                GameState& gs = g_game_state;
+                int act = g_menu.render_survival_results(
+                    (float)emx, (float)emy, g_mouse_clicked_this_frame,
+                    gs.last_run_wave, gs.last_run_tier, gs.last_run_kills,
+                    gs.last_run_points, g_meta.best_wave, g_meta.unlocked_tier,
+                    gs.last_run_new_unlock, gs.last_run_unlock_text);
+                if (act == 1) { // RETRY: same tier, fresh seed
+                    audio.play_click();
+                    gs.survival_seed = (uint32_t)(glfwGetTime() * 1000.0) ^ 0x9E3779B9u;
+                    gs.survival_tier = std::min(gs.survival_tier, g_meta.unlocked_tier);
+                    start_battle();
+                } else if (act == 2) { // MENU
+                    audio.play_click();
+                    gs.phase = GamePhase::Menu;
+                    audio.play_music(0);
+                }
+            } else {
+                g_menu.render_end_screen(g_game_state, g_game_state.phase == GamePhase::Victory, (float)emx, (float)emy);
+                if (g_mouse_clicked_this_frame && g_game_state.menu_hover == 0) {
+                    g_game_state.phase = GamePhase::Playing;
+                }
             }
         }
 

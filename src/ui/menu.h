@@ -877,4 +877,65 @@ void main() { frag = u_color; }
         end_2d();
         return result;
     }
+
+    // Survival setup overlay: difficulty tier (gated by unlocked_tier), a
+    // shareable seed, lifetime records, and START/BACK. Returns an action:
+    //   0 = none, 1 = START run, 2 = BACK, 3 = tier-, 4 = tier+, 5 = reroll seed
+    int render_survival_setup(GameState& state, float mx, float my, bool click,
+                              int unlocked_tier, int best_wave, int best_tier,
+                              int runs_played, int meta_points) {
+        begin_2d();
+        draw_rect(0, 0, (float)screen_w, (float)screen_h, {0.0f, 0.0f, 0.0f, 0.7f});
+        float cx = screen_w * 0.5f;
+        draw_text_centered("SURVIVAL", cx, screen_h * 0.12f, 5.0f, {1.0f, 0.45f, 0.7f, 1.0f});
+
+        char buf[96];
+        // Lifetime records line
+        snprintf(buf, sizeof(buf), "BEST: WAVE %d  (TIER %d)   RUNS %d   MP %d",
+                 best_wave, best_tier, runs_played, meta_points);
+        draw_text_centered(buf, cx, screen_h * 0.22f, 1.7f, {0.7f, 0.8f, 0.9f, 0.9f});
+
+        int action = 0;
+        // --- difficulty tier row ---
+        float ty = screen_h * 0.34f;
+        draw_text_centered("DIFFICULTY TIER", cx, ty - 30, 2.0f, {0.9f, 0.8f, 0.4f, 1.0f});
+        // minus
+        if (button_box(cx - 180, ty, 60, 50, "-", mx, my, click)) action = 3;
+        snprintf(buf, sizeof(buf), "%d", state.survival_tier);
+        draw_text_centered(buf, cx, ty + 8, 3.5f, {1.0f, 1.0f, 1.0f, 1.0f});
+        snprintf(buf, sizeof(buf), "/ %d", unlocked_tier);
+        draw_text_centered(buf, cx + 70, ty + 16, 1.6f, {0.6f, 0.6f, 0.7f, 0.9f});
+        // plus
+        if (button_box(cx + 120, ty, 60, 50, "+", mx, my, click)) action = 4;
+
+        // --- seed row ---
+        float sy = screen_h * 0.50f;
+        snprintf(buf, sizeof(buf), "SEED  %u", state.survival_seed);
+        draw_text_centered(buf, cx, sy, 2.2f, {0.6f, 0.9f, 0.8f, 1.0f});
+        if (button_box(cx - 90, sy + 36, 180, 44, "REROLL SEED", mx, my, click)) action = 5;
+
+        // --- start / back ---
+        float by = screen_h * 0.70f;
+        if (button_box(cx - 220, by, 200, 64, "START RUN", mx, my, click)) action = 1;
+        if (button_box(cx + 20, by, 200, 64, "BACK", mx, my, click)) action = 2;
+        end_2d();
+        return action;
+    }
+
+    // Small clickable box helper (hover highlight + centered label).
+    bool button_box(float x, float y, float w, float h, const char* label,
+                    float mx, float my, bool click) {
+        bool hover = (mx > x && mx < x + w && my > y && my < y + h);
+        glm::vec4 bg = hover ? glm::vec4(0.25f, 0.15f, 0.28f, 0.98f)
+                             : glm::vec4(0.12f, 0.08f, 0.14f, 0.95f);
+        draw_rect(x, y, w, h, bg);
+        glm::vec4 edge = hover ? glm::vec4(1.0f, 0.6f, 0.85f, 1.0f)
+                               : glm::vec4(0.5f, 0.35f, 0.5f, 0.8f);
+        draw_rect(x, y, w, 3, edge);
+        draw_rect(x, y + h - 3, w, 3, edge);
+        float sc = (h > 50) ? 2.2f : 1.7f;
+        draw_text_centered(label, x + w * 0.5f, y + h * 0.5f - sc * 4, sc,
+                           hover ? glm::vec4(1, 1, 1, 1) : glm::vec4(0.85f, 0.8f, 0.85f, 1));
+        return hover && click;
+    }
 };

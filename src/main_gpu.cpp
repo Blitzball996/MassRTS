@@ -32,6 +32,7 @@
 #include "game/loading_manager.h"
 #include "game/settlement_system.h"
 #include "game/wave_director.h"
+#include "game/meta_progression.h"
 #include "ui/menu.h"
 #include "net/session.h"
 #define MINIAUDIO_IMPLEMENTATION
@@ -65,6 +66,9 @@ bool g_nuke_targeting = false;
 GameState g_game_state;
 // Survival / roguelite wave director (only active when mode == Survival).
 WaveDirector g_wave_director;
+// Cross-run meta progression (persistent save file).
+MetaProgression g_meta;
+bool g_meta_recorded = false;  // guard so a run's result is banked exactly once
 SettlementSystem g_settlements; // AI commanders: march -> settle -> build -> produce
 MenuRenderer g_menu;
 LoadingManager g_loader;
@@ -646,6 +650,13 @@ int main(int argc, char* argv[]) {
             float wsize = MAP_PRESETS[g_game_state.selected_map].world_size;
             g_wave_director.start_run(base, wsize, g_game_state.survival_seed,
                                       g_game_state.survival_tier);
+            // Apply persistent cross-run unlocks (局间成长) to this run.
+            if (g_meta.unlock_richstart) world.money[0] += 400;
+            if (g_meta.unlock_veterans) {
+                // 50% bigger starter garrison.
+                spawn_army(world, Faction::Red, {-560, 60}, 400, {0.25f, 0.3f, 0.2f}, true);
+            }
+            g_meta_recorded = false; // arm result-banking for this run
             g_wave_director.begin_prep(world);
         }
         audio.play_music(1); // switch menu -> battle track
@@ -675,6 +686,12 @@ int main(int argc, char* argv[]) {
             fclose(diag);
         }
     }
+
+    // --survival: jump straight into a survival run (skips the menu click).
+    // Load cross-run survival progression (unlocks, best results) before any
+    // run can start. Defaults are kept if the save file is absent.
+    g_meta.load();
+    g_game_state.survival_tier = std::min(g_game_state.survival_tier, g_meta.unlocked_tier);
 
     // --survival: jump straight into a survival run (skips the menu click).
     if (auto_survival) {
@@ -1109,6 +1126,12 @@ int main(int argc, char* argv[]) {
             if (!renderer.bases.bases[0].alive) {
                 wd.run_active = false;
                 g_game_state.phase = GamePhase::Defeat;
+                // Bank the run result once (unlocks, best wave/tier, meta points).
+                if (!g_meta_recorded) {
+                    // wd.wave is the wave we died on (>=1 once a wave started).
+                    g_meta.record_run(wd.wave, wd.difficulty_tier, world.score[0]);
+                    g_meta_recorded = true;
+                }
             } else if (wd.phase == SurvivalPhase::Prep) {
                 if (wd.tick_prep(dt)) wd.begin_wave(world);
             } else if (wd.phase == SurvivalPhase::Combat) {
@@ -1356,28 +1379,56 @@ int main(int argc, char* argv[]) {
             double mmx, mmy; glfwGetCursorPos(window, &mmx, &mmy);
             g_menu.screen_w = g_screen_w; g_menu.screen_h = g_screen_h;
             g_menu.render_main_menu(g_game_state, (float)mmx, (float)mmy);
+
+            // Detect a fresh left-click edge (shared by menu + survival overlay).
             static bool menu_was_pressed = false;
-            if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
-                if (!menu_was_pressed) {
-                    if (g_game_state.menu_hover == 0) {
-                        audio.play_click();
-                        g_game_state.mode = GameMode::Skirmish;
-                        start_battle(); // start with currently-selected map
-                    } else if (g_game_state.menu_hover == 3) {
-                        audio.play_click();
-                        g_game_state.mode = GameMode::Survival;
-                        start_battle(); // survival run on the selected map
-                    } else if (g_game_state.menu_hover == 1) {
-                        audio.play_click();
-                        g_game_state.phase = GamePhase::MapSelect;
-                    } else if (g_game_state.menu_hover == 2) {
-                        audio.play_click();
-                        settings_return = GamePhase::Menu; // came from the title screen
-                        g_game_state.phase = GamePhase::Settings;
-                    }
+            bool lmb = (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS);
+            bool click_edge = lmb && !menu_was_pressed;
+
+            if (g_game_state.survival_setup_open) {
+                // --- Survival tier/seed setup overlay (drawn over the menu) ---
+                int act = g_menu.render_survival_setup(
+                    g_game_state, (float)mmx, (float)mmy, click_edge,
+                    g_meta.unlocked_tier, g_meta.best_wave, g_meta.best_tier,
+                    g_meta.runs_played, g_meta.meta_points);
+                if (act == 3) { // tier -
+                    audio.play_click();
+                    g_game_state.survival_tier = std::max(1, g_game_state.survival_tier - 1);
+                } else if (act == 4) { // tier +
+                    audio.play_click();
+                    g_game_state.survival_tier = std::min(g_meta.unlocked_tier, g_game_state.survival_tier + 1);
+                } else if (act == 5) { // reroll seed
+                    audio.play_click();
+                    g_game_state.survival_seed = (uint32_t)(glfwGetTime() * 1000.0) ^ 0x9E3779B9u;
+                } else if (act == 1) { // START
+                    audio.play_click();
+                    g_game_state.survival_setup_open = false;
+                    g_game_state.mode = GameMode::Survival;
+                    start_battle();
+                } else if (act == 2) { // BACK
+                    audio.play_click();
+                    g_game_state.survival_setup_open = false;
                 }
-                menu_was_pressed = true;
-            } else { menu_was_pressed = false; }
+            } else if (click_edge) {
+                if (g_game_state.menu_hover == 0) {
+                    audio.play_click();
+                    g_game_state.mode = GameMode::Skirmish;
+                    start_battle(); // start with currently-selected map
+                } else if (g_game_state.menu_hover == 3) {
+                    audio.play_click();
+                    g_game_state.survival_tier = std::min(g_game_state.survival_tier, g_meta.unlocked_tier);
+                    g_game_state.survival_setup_open = true; // open tier/seed picker
+                } else if (g_game_state.menu_hover == 1) {
+                    audio.play_click();
+                    g_game_state.phase = GamePhase::MapSelect;
+                } else if (g_game_state.menu_hover == 2) {
+                    audio.play_click();
+                    settings_return = GamePhase::Menu; // came from the title screen
+                    g_game_state.phase = GamePhase::Settings;
+                }
+            }
+            menu_was_pressed = lmb;
+        } else if (g_game_state.phase == GamePhase::MapSelect) {
         } else if (g_game_state.phase == GamePhase::MapSelect) {
             double mmx, mmy; glfwGetCursorPos(window, &mmx, &mmy);
             g_menu.screen_w = g_screen_w; g_menu.screen_h = g_screen_h;

@@ -852,7 +852,18 @@ void main() { frag = u_color; }
         glBindVertexArray(vao);
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     }
-    void end_2d() { glDisable(GL_BLEND); glBindVertexArray(0); }
+    void end_2d() {
+        glDisable(GL_BLEND);
+        glBindVertexArray(0);
+        // Restore depth state the 3D scene relies on. begin_2d() disables depth
+        // test AND masks depth writes; if we leave the write-mask OFF, the next
+        // frame's glClear(GL_DEPTH_BUFFER_BIT) is silently ignored, the depth
+        // buffer stays at 0 (near), and GL_LESS then rejects EVERY fragment —
+        // the whole 3D scene renders as just the clear colour (the survival
+        // "blue screen": its setup overlay ran begin_2d/end_2d before the battle).
+        glDepthMask(GL_TRUE);
+        glEnable(GL_DEPTH_TEST);
+    }
 
     // Top-center survival status banner: WAVE n, phase, prep timer / enemies.
     void render_survival_banner(int wave, int phase, float prep_timer,

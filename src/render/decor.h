@@ -30,7 +30,9 @@ public:
     GLuint tree_inst_vbo = 0, rock_inst_vbo = 0, banner_inst_vbo = 0;
     std::vector<DecorInstance> trees, rocks, banners;
 
-    void generate(float world_size, std::function<float(float,float)> get_height) {
+    // CPU-only: place decor instances. Safe to call from a worker thread (no GL).
+    void generate_cpu(float world_size, std::function<float(float,float)> get_height) {
+        trees.clear(); rocks.clear(); banners.clear();
         std::mt19937 rng(12345);
         std::uniform_real_distribution<float> pos_dist(-world_size * 0.45f, world_size * 0.45f);
         std::uniform_real_distribution<float> rot_dist(0.0f, 6.28f);
@@ -55,25 +57,22 @@ public:
             float s = scale_dist(rng) * 4.0f;
             rocks.push_back({{x, y, z}, rot_dist(rng), s, {0.4f, 0.38f, 0.35f}});
         }
+    }
 
-        // War banners along the front lines
-        for (int i = 0; i < 20; i++) {
-            float x = -200.0f + i * 20.0f;
-            float z = (i % 2 == 0) ? -5.0f : 5.0f;
-            float y = get_height(x, z);
-            glm::vec3 col = (i < 10) ? glm::vec3(0.8f, 0.1f, 0.1f) : glm::vec3(0.1f, 0.2f, 0.8f);
-            banners.push_back({{x, y, z}, 0, 6.0f, col});
-        }
-
-        // Build meshes
+    // GL-only: build meshes + upload instances. MUST run on the main thread.
+    void upload_gl() {
         build_tree_mesh();
         build_rock_mesh();
         build_banner_mesh();
-
-        // Upload instances
         tree_inst_vbo = upload_instances(tree_vao, trees);
         rock_inst_vbo = upload_instances(rock_vao, rocks);
         banner_inst_vbo = upload_instances(banner_vao, banners);
+    }
+
+    // Convenience: full generate (CPU + GL) on the main thread.
+    void generate(float world_size, std::function<float(float,float)> get_height) {
+        generate_cpu(world_size, get_height);
+        upload_gl();
     }
 
     void render(GLuint shader) {

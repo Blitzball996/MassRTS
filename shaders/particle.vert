@@ -3,12 +3,15 @@ layout(location=0) in vec2 a_vertex;
 layout(location=2) in vec3 a_inst_pos;
 layout(location=3) in vec3 a_inst_color;
 layout(location=4) in float a_inst_size;
+layout(location=5) in float a_inst_age;
 
 uniform mat4 u_view;
 uniform mat4 u_proj;
 
 out vec3 v_color;
 out vec2 v_uv;
+out float v_age;
+out vec4 v_clip_pos;
 
 void main() {
     // Billboard: face camera
@@ -19,7 +22,9 @@ void main() {
         + cam_right * a_vertex.x * a_inst_size
         + cam_up * a_vertex.y * a_inst_size;
     
-    gl_Position = u_proj * u_view * vec4(world_pos, 1.0);
+    v_clip_pos = u_proj * u_view * vec4(world_pos, 1.0);
+    gl_Position = v_clip_pos;
     v_color = a_inst_color;
     v_uv = a_vertex + 0.5;
+    v_age = a_inst_age;
 }

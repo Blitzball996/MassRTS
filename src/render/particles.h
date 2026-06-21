@@ -28,6 +28,7 @@ public:
         glm::vec3 pos;
         glm::vec3 col;
         float size;
+        float age;  // normalized age: 0 (just spawned) -> 1 (dying)
     };
     std::vector<ParticleGPU> gpu_data;
 
@@ -63,6 +64,9 @@ public:
         // size
         glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, sizeof(ParticleGPU), (void*)(6*sizeof(float)));
         glEnableVertexAttribArray(4); glVertexAttribDivisor(4, 1);
+        // age (normalized 0->1)
+        glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, sizeof(ParticleGPU), (void*)(7*sizeof(float)));
+        glEnableVertexAttribArray(5); glVertexAttribDivisor(5, 1);
 
         glBindVertexArray(0);
     }
@@ -97,9 +101,103 @@ public:
         particles.push_back(p);
     }
 
+    // LAYERED EXPLOSION: a convincing blast is several stacked sub-emitters, not
+    // one big sphere. We layer: flash + fireball + rising smoke column + debris
+    // chunks + ground dust ring + sparks. Colors carry HDR energy (>1.0) so the
+    // bloom pass makes the fire core actually glow. `scale` ~1 for a cannon hit,
+    // ~6+ for a nuke (which gets special mushroom cloud treatment).
+    void spawn_layered_explosion(glm::vec3 c, float scale) {
+        std::uniform_real_distribution<float> u(-1.0f, 1.0f);
+        std::uniform_real_distribution<float> p01(0.0f, 1.0f);
+        auto dir = [&]() { return glm::normalize(glm::vec3(u(rng), u(rng) * 0.4f + 0.3f, u(rng))); };
+
+        bool is_nuke = (scale > 5.0f);
+
+        // 1. FLASH — a few huge, ultra-bright, short-lived billboards (the pop).
+        int flash_n = (int)(2 + scale * 0.8f);
+        for (int i = 0; i < flash_n && particles.size() < MAX_PARTICLES; i++)
+            push(c + glm::vec3(0, scale * 1.5f, 0), glm::vec3(0, scale * 2.0f, 0),
+                 glm::vec3(8.0f, 6.0f, 3.0f), 0.18f, scale * 6.0f, 0.0f, 4.0f, scale * 8.0f);
+
+        // 2. FIREBALL — hot expanding orange core, additive-friendly HDR color.
+        int fire_n = (int)(20 * scale);
+        for (int i = 0; i < fire_n && particles.size() < MAX_PARTICLES; i++) {
+            glm::vec3 v = dir() * (15.0f + p01(rng) * 25.0f) * scale;
+            push(c + glm::vec3(0, scale, 0), v, glm::vec3(4.0f, 1.6f, 0.4f),
+                 0.5f + p01(rng) * 0.4f, scale * (1.5f + p01(rng)), 6.0f, 1.5f, scale * 2.0f);
+        }
+
+        // 3. SMOKE COLUMN — for nukes, spawn as a rising mushroom cap + stem.
+        int smoke_n = (int)(15 * scale);
+        for (int i = 0; i < smoke_n && particles.size() < MAX_PARTICLES; i++) {
+            if (is_nuke) {
+                // MUSHROOM CLOUD: stem shoots straight up, cap billows outward at top
+                bool is_stem = (p01(rng) < 0.4f); // 40% stem, 60% cap
+                glm::vec3 v;
+                glm::vec3 spawn_pos;
+                if (is_stem) {
+                    // Stem: tight vertical column rising from ground
+                    v = glm::vec3(u(rng) * 4.0f, 40.0f + p01(rng) * 30.0f, u(rng) * 4.0f);
+                    spawn_pos = c + glm::vec3(u(rng) * scale * 0.5f, scale * 0.5f, u(rng) * scale * 0.5f);
+                } else {
+                    // Cap: billows outward at high altitude, then slows (mushroom top)
+                    float angle = p01(rng) * 6.2831853f;
+                    float radial_speed = 20.0f + p01(rng) * 15.0f;
+                    v = glm::vec3(cos(angle) * radial_speed, 25.0f + p01(rng) * 10.0f, sin(angle) * radial_speed);
+                    spawn_pos = c + glm::vec3(0, scale * 6.0f, 0); // spawn high
+                }
+                push(spawn_pos, v, glm::vec3(0.16f, 0.15f, 0.14f),
+                     2.5f + p01(rng) * 2.0f, scale * (3.0f + p01(rng) * 2.0f),
+                     is_stem ? -8.0f : -15.0f, // cap slows more (negative grav = drag)
+                     0.6f, scale * (is_stem ? 2.5f : 5.0f));
+            } else {
+                // Regular cannon: generic rising smoke
+                glm::vec3 v = glm::vec3(u(rng) * 6.0f, 12.0f + p01(rng) * 18.0f, u(rng) * 6.0f) * scale * 0.5f;
+                push(c + glm::vec3(u(rng) * scale, scale * 2.0f, u(rng) * scale), v,
+                     glm::vec3(0.18f, 0.17f, 0.16f), 1.6f + p01(rng) * 1.5f,
+                     scale * (2.0f + p01(rng) * 2.0f), -3.0f, 0.8f, scale * 3.0f);
+            }
+        }
+
+        // 4. DEBRIS CHUNKS — heavy, fast, gravity-bound, no growth.
+        int debris_n = (int)(8 * scale);
+        for (int i = 0; i < debris_n && particles.size() < MAX_PARTICLES; i++) {
+            glm::vec3 v = dir() * (30.0f + p01(rng) * 40.0f) * scale;
+            push(c + glm::vec3(0, scale, 0), v, glm::vec3(0.25f, 0.18f, 0.12f),
+                 1.0f + p01(rng), scale * 0.6f, 120.0f, 0.0f, 0.0f);
+        }
+
+        // 5. GROUND DUST RING — expands outward low to the ground.
+        int dust_n = (int)(16 * scale);
+        for (int i = 0; i < dust_n && particles.size() < MAX_PARTICLES; i++) {
+            float a = 6.2831853f * i / glm::max(1, dust_n);
+            glm::vec3 v = glm::vec3(cos(a), 0.1f, sin(a)) * (20.0f + p01(rng) * 10.0f) * scale;
+            push(c + glm::vec3(0, 0.5f, 0), v, glm::vec3(0.45f, 0.40f, 0.34f),
+                 0.9f + p01(rng) * 0.5f, scale * 1.5f, 2.0f, 1.2f, scale * 2.5f);
+        }
+
+        // 6. SPARKS — tiny, very bright, fast, fade quick (bloom highlights).
+        int spark_n = (int)(25 * scale);
+        for (int i = 0; i < spark_n && particles.size() < MAX_PARTICLES; i++) {
+            glm::vec3 v = dir() * (40.0f + p01(rng) * 50.0f) * scale;
+            push(c + glm::vec3(0, scale, 0), v, glm::vec3(6.0f, 3.5f, 1.0f),
+                 0.4f + p01(rng) * 0.3f, scale * 0.3f, 60.0f, 0.5f, 0.0f);
+        }
+
+        // 7. NUKE SHOCKWAVE RING (bonus for big blasts) — fast horizontal ring of bright particles
+        if (is_nuke) {
+            int ring_n = (int)(30 * scale);
+            for (int i = 0; i < ring_n && particles.size() < MAX_PARTICLES; i++) {
+                float a = 6.2831853f * i / (float)ring_n;
+                glm::vec3 v = glm::vec3(cos(a), 0.0f, sin(a)) * (60.0f + p01(rng) * 20.0f) * scale;
+                push(c + glm::vec3(0, scale * 0.5f, 0), v,
+                     glm::vec3(2.5f, 1.8f, 1.0f), 0.35f, scale * 0.8f, 5.0f, 2.0f, scale * 1.5f);
+            }
+        }
+    }
+
     // ARROW IMPACT: small puff of dust + a couple of skidding splinters.
-    void spawn_arrow_impact(glm::vec3 pos) {
-        std::uniform_real_distribution<float> a(-1.0f,1.0f);
+    void spawn_arrow_impact(glm::vec3 pos) {        std::uniform_real_distribution<float> a(-1.0f,1.0f);
         for (int i=0;i<4 && particles.size()<MAX_PARTICLES;i++)
             push(pos+glm::vec3(0,0.5f,0), glm::vec3(a(rng)*8,5+a(rng)*4,a(rng)*8),
                  glm::vec3(0.55f,0.5f,0.42f), 0.35f, 0.6f, 40.0f, 2.0f, 0.0f);
@@ -197,8 +295,9 @@ public:
 
         gpu_data.clear();
         for (auto& p : particles) {
-            float f = p.max_life > 0 ? p.life / p.max_life : 1.0f;
-            gpu_data.push_back({p.position, p.color * glm::clamp(f, 0.0f, 1.0f), p.size});
+            float age = p.max_life > 0 ? (p.max_life - p.life) / p.max_life : 0.0f;
+            age = glm::clamp(age, 0.0f, 1.0f);
+            gpu_data.push_back({p.position, p.color, p.size, age});
         }
 
         glUseProgram(shader);

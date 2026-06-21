@@ -456,7 +456,15 @@ public:
                 if (!(edges & (1 << e))) continue;
                 int a = MC_EDGE_CORNERS[e][0], b = MC_EDGE_CORNERS[e][1];
                 float da = val[a], db = val[b];
-                float t = (std::fabs(db - da) < 1e-6f) ? 0.5f : (0.0f - da) / (db - da);
+                // Clamp t to the edge. Carved cells store smin/smax-blended field
+                // values whose magnitudes no longer vary linearly along an edge,
+                // so the raw root (0-da)/(db-da) can land far outside [0,1] and
+                // fling the vertex outside its cell — that is the stray stretched
+                // polygon seen around a fresh dig. Clamping keeps every vertex on
+                // its own edge so the surface stays watertight.
+                float denom = db - da;
+                float t = (std::fabs(denom) < 1e-6f) ? 0.5f : (0.0f - da) / denom;
+                t = (t < 0.0f) ? 0.0f : (t > 1.0f ? 1.0f : t);
                 vert[e] = pos[a] + t * (pos[b] - pos[a]);
             }
 

@@ -90,6 +90,23 @@ public:
         }
     }
 
+    // Query all entities within a circular radius (for RVO neighbor sensing).
+    std::vector<Entity> query_radius(float x, float y, float radius) const {
+        std::vector<Entity> results;
+        int min_cx = std::max(0, cell_x(x - radius));
+        int max_cx = std::min(GRID_WIDTH - 1, cell_x(x + radius));
+        int min_cy = std::max(0, cell_y(y - radius));
+        int max_cy = std::min(GRID_HEIGHT - 1, cell_y(y + radius));
+        for (int cy = min_cy; cy <= max_cy; cy++) {
+            for (int cx = min_cx; cx <= max_cx; cx++) {
+                const Cell& cell = cells[cy * GRID_WIDTH + cx];
+                for (int k = 0; k < cell.count; k++)
+                    results.push_back(cell.entities[k]);
+            }
+        }
+        return results;
+    }
+
     // Count allies vs enemies within `radius` of `pos`. Used by artillery to
     // avoid dropping shells on its own troops. Writes results to out params.
     void count_factions_near(glm::vec2 pos, float radius, Faction my_faction,

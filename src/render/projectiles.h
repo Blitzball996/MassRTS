@@ -4,6 +4,7 @@
 #include <vector>
 #include <cmath>
 #include <random>
+#include <algorithm>
 #include "../ecs/components.h"
 
 enum class ProjectileType : uint8_t { Arrow = 0, Cannonball = 1 };
@@ -16,6 +17,21 @@ struct Projectile {
     Faction faction;
     float life;
     float size;
+    // Trail ribbon history: recent positions, newest at back. Used to draw a
+    // fading trail behind the projectile so bloom catches a streak, not a dot.
+    static constexpr int TRAIL_LEN = 12;
+    glm::vec3 trail[TRAIL_LEN];
+    int trail_count = 0;
+    float trail_timer = 0.0f;
+
+    void push_trail() {
+        if (trail_count < TRAIL_LEN) {
+            trail[trail_count++] = position;
+        } else {
+            for (int i = 0; i < TRAIL_LEN - 1; i++) trail[i] = trail[i + 1];
+            trail[TRAIL_LEN - 1] = position;
+        }
+    }
 };
 
 struct ProjectileHit {
@@ -136,6 +152,14 @@ public:
             p.velocity.y -= 60.0f * dt;
             p.position += p.velocity * dt;
 
+            // Record trail history at a fixed cadence so the ribbon is smooth
+            // regardless of frame rate.
+            p.trail_timer += dt;
+            if (p.trail_timer >= 0.02f) {
+                p.trail_timer = 0.0f;
+                p.push_trail();
+            }
+
             float ground_y = get_height ? get_height(p.position.x, p.position.z) : 0.0f;
             bool hit_ground = p.position.y <= ground_y;
             bool expired = p.life <= 0;
@@ -179,14 +203,35 @@ public:
             g.dir = vlen > 0.1f ? p.velocity / vlen : glm::vec3(0, 1, 0);
             g.size = p.size;
             if (p.type == ProjectileType::Arrow) {
-                g.color = glm::vec3(0.45f, 0.28f, 0.1f);
-                g.stretch = 4.0f;
+                g.color = glm::vec3(0.6f, 0.4f, 0.15f); // arrows stay non-glowing
+                g.stretch = 7.0f;                        // long & slender so it reads as an arrow
             } else {
-                g.color = glm::vec3(0.15f, 0.15f, 0.15f);
-                if (p.size > 5.0f) g.color = glm::vec3(1.0f, 0.4f, 0.0f);
+                // HDR-emissive core (>1.0) so the bloom pass makes it actually
+                // glow instead of reading as a dead black billiard ball.
+                if (p.size > 5.0f) g.color = glm::vec3(6.0f, 2.4f, 0.4f); // nuke shell: white-hot
+                else               g.color = glm::vec3(3.0f, 1.2f, 0.3f); // cannon: orange glow
                 g.stretch = 1.0f;
             }
             gpu_data.push_back(g);
+
+            // Trail ribbon: only for cannon/nuke shells (the "black billiard
+            // ball" case). Arrows can number 60k+ in a volley, so trailing them
+            // all would explode the instance count for little visual gain.
+            bool is_arrow = (p.type == ProjectileType::Arrow);
+            if (!is_arrow) {
+                for (int t = 0; t < p.trail_count; t++) {
+                    if (gpu_data.size() >= (size_t)MAX_PROJECTILES) break;
+                    float frac = (float)t / (float)Projectile::TRAIL_LEN; // 0=oldest,1=newest
+                    ProjectileGPU tg;
+                    tg.pos = p.trail[t];
+                    tg.dir = g.dir;
+                    tg.stretch = 1.0f;
+                    tg.size = p.size * (0.25f + 0.5f * frac); // shrink toward the tail
+                    // hot core color faded by trail age (older = dimmer/redder)
+                    tg.color = glm::mix(glm::vec3(0.6f, 0.1f, 0.0f), g.color, frac) * frac;
+                    gpu_data.push_back(tg);
+                }
+            }
         }
 
         glUseProgram(shader);
@@ -194,10 +239,11 @@ public:
         glUniformMatrix4fv(glGetUniformLocation(shader, "u_proj"), 1, GL_FALSE, &proj[0][0]);
 
         glBindBuffer(GL_ARRAY_BUFFER, vbo_inst);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, gpu_data.size() * sizeof(ProjectileGPU), gpu_data.data());
+        size_t upload_count = std::min(gpu_data.size(), (size_t)MAX_PROJECTILES);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, upload_count * sizeof(ProjectileGPU), gpu_data.data());
 
         glBindVertexArray(vao);
-        glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (int)gpu_data.size());
+        glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (int)upload_count);
         glBindVertexArray(0);
     }
 

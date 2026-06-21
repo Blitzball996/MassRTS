@@ -24,12 +24,30 @@ void main() {
 
     vec3 offset;
     if (a_inst_stretch > 2.0) {
-        // Arrow: stretch along velocity, thin across.
-        vec3 dir = normalize(a_inst_dir);
-        vec3 right = normalize(cross(dir, cam_up));
-        float w = a_inst_size;
-        float h = a_inst_size * a_inst_stretch;
-        offset = right * a_pos.x * w + dir * a_pos.y * h;
+        // Arrow: cylindrical billboard aligned to flight direction.
+        // The arrow's length-axis follows velocity; the width-axis faces the camera
+        // so the arrow is always readable but points where it's going.
+        vec3 flight_dir = normalize(a_inst_dir);
+        vec3 cam_forward = -vec3(u_view[0][2], u_view[1][2], u_view[2][2]);
+        
+        // Right vector perpendicular to flight direction, pointing toward camera
+        vec3 right = cross(flight_dir, cam_forward);
+        float rl = length(right);
+        if (rl < 0.01) {
+            // Degenerate case: arrow flies directly at/away from camera.
+            // Fall back to any perpendicular (use cam_up as reference).
+            right = normalize(cross(flight_dir, cam_up));
+        } else {
+            right = right / rl;
+        }
+        
+        // Motion stretch: faster arrows get visually elongated (motion blur proxy).
+        float vel_mag = length(a_inst_dir);
+        float stretch_mult = 1.0 + clamp(vel_mag / 100.0, 0.0, 1.5); // cap at 2.5x
+        
+        float w = a_inst_size * 0.5;  // quad width houses the arrowhead; frag keeps the shaft thin
+        float h = a_inst_size * a_inst_stretch * stretch_mult;
+        offset = right * a_pos.x * w + flight_dir * a_pos.y * h;
     } else {
         // Cannonball / nuke: camera-facing round billboard (sphere impostor).
         float r = a_inst_size;

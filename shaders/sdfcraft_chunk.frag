@@ -18,7 +18,17 @@ const int MAT_GENERIC=0, MAT_GRASS=1, MAT_DIRT=2, MAT_ROCK=3, MAT_SAND=4,
           MAT_SNOW=5, MAT_WOOD=6, MAT_LEAVES=7, MAT_ORE=8, MAT_WATER=9, MAT_GRAVEL=10;
 
 // === Noise (verbatim from terrain.frag) ===
-float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
+// sin(dot())*big-number hashing aliases into regular diagonal stripes once the
+// world coords get large (GPU sin precision collapses) — that is the banding
+// seen across the ground. This integer bit-hash stays stable at any world
+// position, so terrain detail reads as clean noise everywhere.
+float hash(vec2 p) {
+    uvec2 q = uvec2(ivec2(floor(p)) + 0x10000);
+    uint  n = (q.x * 1597334673u) ^ (q.y * 3812015801u);
+    n = (n ^ (n >> 15)) * 2246822519u;
+    n = (n ^ (n >> 13));
+    return float(n & 0x00FFFFFFu) / float(0x01000000u);
+}
 float noise(vec2 p) {
     vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
     return mix(mix(hash(i),hash(i+vec2(1,0)),f.x), mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);
@@ -250,5 +260,5 @@ void main() {
     float above = clamp(v_world.y / 80.0, 0.0, 1.0);
     color = mix(color, color * vec3(0.92, 0.96, 1.04), above * 0.15);
 
-    frag = vec4(color, u_alpha);
+    frag = vec4(n * 0.5 + 0.5, u_alpha); // DEBUG normals
 }

@@ -13,7 +13,10 @@
 #include "../core/asset_manifest.h"
 #include "skinned_model.h"
 #include "particles.h"
+#include "postfx.h"
 #include "projectiles.h"
+#include "corpse_system.h"
+#include "fluid_system.h"
 #include "gpu_compute.h"
 #include <string>
 #include <vector>
@@ -86,7 +89,13 @@ public:
     BaseSystem bases;
     ModelLibrary models;
     ParticleSystem particles;
+    PostFX postfx;
+    std::string shader_dir_cached;
     ProjectileSystem projectiles;
+    CorpseSystem corpses;
+    GLuint decal_shader = 0;
+    FluidSystem fluid;
+    GLuint water_shader = 0;
     GPUCompute gpu_compute;
 
     GLuint select_vao = 0, select_vbo_q = 0;
@@ -112,8 +121,15 @@ public:
         brush_shader = load_shader(sd+"brush.vert", sd+"brush.frag");
         sky_shader = load_shader(sd+"sky.vert", sd+"sky.frag");
         decor_shader = load_shader(sd+"decor.vert", sd+"decor.frag");
+        decal_shader = load_shader(sd+"decal.vert", sd+"decal.frag");
+        water_shader = load_shader(sd+"water.vert", sd+"water.frag");
         glGenVertexArrays(1, &sky_vao); // empty VAO; sky is a gl_VertexID triangle
         if (!unit_shader || !terrain_shader) return false;
+
+        // HDR + Bloom + tonemap post-processing. If it fails to init it stays
+        // disabled and the scene renders straight to the backbuffer (LDR).
+        postfx.init(sd, w, h);
+        shader_dir_cached = sd;
 
         // Create all meshes (index matches UnitType enum)
         meshes[0] = MeshGenerator::create_infantry();
@@ -217,13 +233,19 @@ public:
         glEnableVertexAttribArray(10); glVertexAttribDivisor(10,1);
         glBindVertexArray(0);
 
-        terrain.generate();
-        decor.generate(6000.0f, [this](float x, float z){ return terrain.get_height_at(x, z); });
-        bases.init({-550, 0}, {550, 0}, [this](float x, float z){ return terrain.get_height_at(x, z); });
+        // DEFERRED INIT: Terrain/decor/bases are NOT generated here because that
+        // would block the main menu from showing (terrain generation is SLOW).
+        // They are generated inside start_battle() when the player clicks START.
+        // terrain.generate();
+        // decor.generate(6000.0f, [this](float x, float z){ return terrain.get_height_at(x, z); });
+        // bases.init({-550, 0}, {550, 0}, [this](float x, float z){ return terrain.get_height_at(x, z); });
+
         particles.init();
         projectiles.init();
-        gpu_compute.init(sd, terrain);
-        sdf_terrain.init(&terrain, 6000.0f);
+        corpses.init(decal_shader);
+        // gpu_compute and sdf_terrain also need terrain, so defer their init.
+        // gpu_compute.init(sd, terrain);
+        // sdf_terrain.init(&terrain, 6000.0f);
 
         if (select_shader) {
             float sq[] = {-1,-1, 1,-1, -1,1, 1,1};
@@ -256,7 +278,7 @@ public:
         return true;
     }
 
-    void update(float dt) { particles.update(dt); game_time += dt; frame_dt = dt; }
+    void update(float dt) { particles.update(dt); corpses.update(dt); game_time += dt; frame_dt = dt; }
 
     void spawn_hit_particles(glm::vec2 pos_xz, glm::vec3 color) {
         float y = terrain.get_height_at(pos_xz.x, pos_xz.y) + 1.0f;
@@ -264,32 +286,74 @@ public:
     }
 
     void spawn_explosion_particles(glm::vec3 center, float radius, bool is_nuke) {
-        int count = is_nuke ? 200 : 30;
-        for (int i = 0; i < count && particles.particles.size() < ParticleSystem::MAX_PARTICLES; i++) {
-            std::uniform_real_distribution<float> ang(0, 6.28f);
-            std::uniform_real_distribution<float> spd(20.0f, is_nuke ? 150.0f : 60.0f);
-            std::uniform_real_distribution<float> up(30.0f, is_nuke ? 200.0f : 80.0f);
-            std::uniform_real_distribution<float> life(0.5f, is_nuke ? 3.0f : 1.5f);
-            std::uniform_real_distribution<float> sz(is_nuke ? 3.0f : 1.0f, is_nuke ? 8.0f : 3.0f);
-            float a = ang(particles.rng);
-            float s = spd(particles.rng);
-            Particle p;
-            p.position = center + glm::vec3(cos(a)*3, 2, sin(a)*3);
-            p.velocity = glm::vec3(cos(a)*s, up(particles.rng), sin(a)*s);
-            p.color = is_nuke ? glm::vec3(1.0f, 0.4f + i*0.003f, 0.0f) : glm::vec3(0.8f, 0.4f, 0.1f);
-            p.life = life(particles.rng);
-            p.size = sz(particles.rng);
-            particles.particles.push_back(p);
-        }
+        // Layered sub-emitter blast (flash + fireball + smoke + debris + dust +
+        // sparks). Scale drives the size/count; nukes are dramatically bigger.
+        float scale = is_nuke ? glm::clamp(radius / 30.0f, 5.0f, 10.0f)
+                              : glm::clamp(radius / 20.0f, 0.8f, 2.0f);
+        particles.spawn_layered_explosion(center, scale);
     }
+
+    // Lightweight menu-background render: sky + cheap heightfield terrain + decor,
+    // NO units and NO expensive SDF marching-cubes mesh (that's too slow to build
+    // for a menu and would freeze startup). Used for the orbiting 3D menu scene.
+    void render_menu_background(const glm::mat4& view, const glm::mat4& proj, glm::vec3 cam_pos) {
+        camera_pos_world = cam_pos;
+        postfx.begin_scene();
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+
+        // Sky
+        if (sky_shader) {
+            glDepthMask(GL_FALSE);
+            glDepthFunc(GL_LEQUAL);
+            glUseProgram(sky_shader);
+            glm::mat4 inv_view = glm::inverse(view);
+            glm::mat4 inv_proj = glm::inverse(proj);
+            glUniformMatrix4fv(glGetUniformLocation(sky_shader,"u_inv_view"),1,GL_FALSE,&inv_view[0][0]);
+            glUniformMatrix4fv(glGetUniformLocation(sky_shader,"u_inv_proj"),1,GL_FALSE,&inv_proj[0][0]);
+            glUniform3f(glGetUniformLocation(sky_shader,"u_sun_dir"), sun_dir.x, sun_dir.y, sun_dir.z);
+            glUniform3f(glGetUniformLocation(sky_shader,"u_cam_pos"), cam_pos.x, cam_pos.y, cam_pos.z);
+            glUniform1f(glGetUniformLocation(sky_shader,"u_time"), (float)glfwGetTime());
+            glBindVertexArray(sky_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glBindVertexArray(0);
+            glDepthMask(GL_TRUE);
+            glDepthFunc(GL_LESS);
+        }
+
+        // Heightfield terrain (cheap mesh, not SDF)
+        glUseProgram(terrain_shader);
+        glUniformMatrix4fv(glGetUniformLocation(terrain_shader,"u_view"),1,GL_FALSE,&view[0][0]);
+        glUniformMatrix4fv(glGetUniformLocation(terrain_shader,"u_proj"),1,GL_FALSE,&proj[0][0]);
+        glUniform1f(glGetUniformLocation(terrain_shader,"u_time"), game_time);
+        glUniform3f(glGetUniformLocation(terrain_shader,"u_cam_pos"), cam_pos.x, cam_pos.y, cam_pos.z);
+        terrain.render();
+
+        // Decor (trees/rocks) for life
+        if (decor_shader) decor.render(decor_shader);
+
+        postfx.resolve();
+    }
+
 
     void render(const World& world, const glm::mat4& view, const glm::mat4& proj, glm::vec3 cam_pos) {
         camera_pos_world = cam_pos;
         // Balance quality vs cost: real 3D meshes up close, cheap imposters in
         // the far field. The spherical billboard now reads as a proper humanoid,
         // so the switch can come in fairly close to keep the mesh count low.
+        // LOD: units closer than this draw as full 3D meshes, farther as cheap
+        // billboards. Scales with camera height so close-up shots stay detailed
+        // and zoomed-out views switch to billboards. Restored to the original
+        // generous band (floor 900) so distant troops keep full detail.
         lod_distance = glm::clamp(cam_pos.y * 0.7f, 900.0f, 2600.0f);
 
+        // Render the scene into the HDR framebuffer (no-op bind to 0 if disabled).
+        postfx.begin_scene();
+        // Depth writes MUST be enabled for the clear to actually reset the depth
+        // buffer to 1.0 — a 2D overlay (menu/survival setup) may have left the
+        // write-mask OFF, which would mask this clear and leave depth at 0 (near),
+        // making GL_LESS reject the entire scene (blue-screen). Force it on.
+        glDepthMask(GL_TRUE);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glEnable(GL_DEPTH_TEST);
 
@@ -329,6 +393,11 @@ public:
         // and combat keep querying get_height_at). Single surface, no z-fight.
         sdf_terrain.render();
 
+        // Ground gore decals: blood pools + flat corpses. Drawn right after the
+        // terrain so living units (rendered below) appear on top — soldiers
+        // visibly trample over the dead, and dense splats merge into rivers.
+        corpses.render(view, proj);
+
         // Decorations: trees/rocks/banners use a dedicated shader so they are
         // shaded as vegetation/props instead of going through the humanoid
         // unit shader (which would tint them like villager robes / armor).
@@ -353,10 +422,15 @@ public:
         glUniform1f(glGetUniformLocation(unit_shader,"u_time"), game_time);
         glUniformMatrix4fv(glGetUniformLocation(unit_shader,"u_proj"),1,GL_FALSE,&proj[0][0]);
         glUniform1f(glGetUniformLocation(unit_shader,"u_model_scale"), 1.0f); // decor/bases use full scale
+        glUniform3f(glGetUniformLocation(unit_shader,"u_cam_pos"), cam_pos.x, cam_pos.y, cam_pos.z);
         bases.render(unit_shader);
 
         // Units (CPU instancing - reliable, GPU handles combat/movement only)
         render_cpu_path(world, view, proj, cam_pos);
+
+        // Water surface (shallow-water height field): transparent, drawn over
+        // the opaque scene so it blends with terrain/units/corpses underneath.
+        fluid.render(view, proj, cam_pos, game_time);
 
         // Projectiles
         if (projectile_shader && !projectiles.projectiles.empty()) {
@@ -365,13 +439,26 @@ public:
             glDepthMask(GL_TRUE);
         }
 
-        // Particles
+        // Particles (with soft-particle depth fade against scene)
         if (particle_shader) {
             glDepthMask(GL_FALSE);
+            glUseProgram(particle_shader);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, postfx.get_depth_texture());
+            glUniform1i(glGetUniformLocation(particle_shader, "u_depth_texture"), 1);
+            glUniform1f(glGetUniformLocation(particle_shader, "u_near"), 1.0f);
+            glUniform1f(glGetUniformLocation(particle_shader, "u_far"), 12000.0f);
             particles.render(view, proj, particle_shader);
             glDepthMask(GL_TRUE);
         }
+
+        // Resolve HDR scene -> bloom -> ACES tonemap -> backbuffer. After this
+        // the default framebuffer holds the final LDR image; HUD draws on top.
+        postfx.resolve();
     }
+
+    // Call on window resize so the HDR/bloom targets track the viewport.
+    void on_resize(int w, int h) { postfx.resize(w, h); }
 
     void render_selection_box(glm::vec2 min_ndc, glm::vec2 max_ndc) {
         if (!select_shader) return;
@@ -590,6 +677,7 @@ private:
         glUniformMatrix4fv(glGetUniformLocation(unit_shader,"u_view"),1,GL_FALSE,&view[0][0]);
         glUniformMatrix4fv(glGetUniformLocation(unit_shader,"u_proj"),1,GL_FALSE,&proj[0][0]);
         glUniform1f(glGetUniformLocation(unit_shader,"u_time"), game_time);
+        glUniform3f(glGetUniformLocation(unit_shader,"u_cam_pos"), cam_pos.x, cam_pos.y, cam_pos.z);
 
         for (int t = 0; t < 3; t++) {
             if (counts[t] == 0) continue;
@@ -711,6 +799,7 @@ private:
         glUniformMatrix4fv(glGetUniformLocation(unit_shader,"u_view"),1,GL_FALSE,&view[0][0]);
         glUniformMatrix4fv(glGetUniformLocation(unit_shader,"u_proj"),1,GL_FALSE,&proj[0][0]);
         glUniform1f(glGetUniformLocation(unit_shader,"u_time"), game_time);
+        glUniform3f(glGetUniformLocation(unit_shader,"u_cam_pos"), cam_pos.x, cam_pos.y, cam_pos.z);
 
         for (int t = 0; t < NUM_MESH_TYPES; t++) {
             if (inst_data[t].empty()) continue;

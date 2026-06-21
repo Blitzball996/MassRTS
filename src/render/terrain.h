@@ -85,10 +85,8 @@ public:
             }
         }
 
-        // Carve river (if preset enables it)
-        if (has_river) carve_river(rng);
-
-        // Carve trenches (preset count)
+        // Carve trenches (preset count) BEFORE the smoothing pass so their
+        // walls get rounded along with the rest of the terrain.
         carve_trenches(rng);
 
         // Apply height_scale from preset
@@ -102,12 +100,18 @@ public:
         for (int pass = 0; pass < 5; pass++) {
             for (int z = 1; z < GRID_SIZE-1; z++) {
                 for (int x = 1; x < GRID_SIZE-1; x++) {
-                    if (biomes(z,x) == TerrainBiome::River) continue;
                     float avg = (heights(z-1,x)+heights(z+1,x)+heights(z,x-1)+heights(z,x+1))*0.25f;
                     heights(z,x) = glm::mix(heights(z,x), avg, 0.4f);
                 }
             }
         }
+
+        // Carve the river LAST, as a smooth distance-to-spline channel. Running
+        // it AFTER the smoothing pass means smoothing can never re-sharpen or
+        // wash out the banks: the cross-section is C1-continuous by construction,
+        // so the riverbank stays smooth at any heightfield/voxel resolution
+        // (root-cause fix for the stair-stepped "folds" along the water edge).
+        if (has_river) carve_river(rng);
 
         // Calculate normals
         for (int z = 0; z < GRID_SIZE; z++) {
@@ -128,7 +132,10 @@ public:
             }
         }
 
-        build_mesh();
+        // CPU vertex assembly only. The GL upload (upload_mesh_gl) is deferred
+        // so generate_with_seed can run on a background loading thread without
+        // touching the OpenGL context (which would freeze the app).
+        build_mesh_cpu();
     }
 
     float get_height_at(float wx, float wz) const {
@@ -304,16 +311,23 @@ private:
     }
 
     void carve_river(std::mt19937& rng) {
-        // Meandering river: sum several octaves of sine at different
-        // frequencies/phases (a cheap 1-D fbm) so the centreline wanders
-        // organically instead of tracing one lazy sine. Width also breathes
-        // along the course, giving wide bends and narrow runs.
+        // Smooth river carved by DISTANCE TO A SPLINE CENTRELINE (kkk.txt fix).
+        // The centreline is a 1-D fbm (sum of sines) that wanders organically;
+        // the cross-section is one continuous smoothstep profile of distance-to-
+        // centre: deep bed -> rising banks -> existing ground, all C1-continuous.
+        // Because the cut is a continuous FUNCTION of position (not a per-cell
+        // "is this cell water?" boolean), the banks never quantise into grid
+        // stair-steps no matter how coarse the heightfield / voxel grid is.
         float river_z = std::uniform_real_distribution<float>(-150, 150)(rng);
         float ph0 = std::uniform_real_distribution<float>(0, 6.28f)(rng);
         float ph1 = std::uniform_real_distribution<float>(0, 6.28f)(rng);
         float ph2 = std::uniform_real_distribution<float>(0, 6.28f)(rng);
         float ph3 = std::uniform_real_distribution<float>(0, 6.28f)(rng);
         float amp = std::uniform_real_distribution<float>(90, 170)(rng);
+
+        const float WATER_Y   = 2.5f;   // channel-top / nominal water level
+        const float BED_DROP  = 3.0f;   // depth of the deepest bed below WATER_Y
+        const float BANK_SPAN = 55.0f;  // wide, smooth bank transition distance
 
         for (int x = 0; x < GRID_SIZE; x++) {
             float wx = ((float)x/(GRID_SIZE-1)-0.5f)*WORLD_SIZE;
@@ -324,31 +338,41 @@ private:
                 + sin(wx*0.0093f + ph2) * amp*0.22f
                 + sin(wx*0.0200f + ph3) * amp*0.10f;
             float river_center_z = river_z + meander;
-            // Width varies (wide meander pools vs narrow rapids).
-            float river_width = 20.0f
+            // Half-width of the flat bed; breathes along the course.
+            float half_width = 22.0f
                 + sin(wx*0.006f + ph2)*8.0f
                 + sin(wx*0.017f + ph1)*4.0f;
 
             for (int z = 0; z < GRID_SIZE; z++) {
                 float wz = ((float)z/(GRID_SIZE-1)-0.5f)*WORLD_SIZE;
-                // Perturb the bank position with multi-octave noise so the
-                // shoreline wiggles organically instead of snapping to grid
-                // cells (the cause of the staircase "folds" at the water edge).
+                // Continuous organic edge wobble (smooth noise, never grid-snapped)
+                // so the shoreline meanders instead of tracing the centreline.
                 float wobble = (fbm(wx*0.05f, wz*0.05f, 4) - 0.5f) * 14.0f
                              + (fbm(wx*0.18f, wz*0.18f, 3) - 0.5f) * 5.0f;
-                float dist_to_river = fabs(wz - river_center_z) + wobble;
-                if (dist_to_river < river_width) {
-                    float t = glm::clamp(dist_to_river / river_width, 0.0f, 1.0f);
-                    float depth = (cos(t * 3.14159f) * 0.5f + 0.5f) * 1.2f;
-                    heights(z,x) = glm::min(heights(z,x), 2.5f - depth);
-                    biomes(z,x) = TerrainBiome::River;
-                } else if (dist_to_river < river_width + 30.0f) {
-                    float t = (dist_to_river - river_width) / 30.0f;
-                    float blend = (cos(t * 3.14159f) + 1.0f) * 0.25f;
-                    heights(z,x) = glm::mix(heights(z,x), 3.0f, blend);
-                    if (biomes(z,x) == TerrainBiome::Grass && t < 0.4f)
-                        biomes(z,x) = TerrainBiome::Sand;
-                }
+                float d = fabs(wz - river_center_z) + wobble; // distance to centre
+
+                // Bed profile: deepest at the centre, easing up to WATER_Y by the
+                // edge of the flat bed.
+                float bedT = glm::smoothstep(0.0f, half_width, d); // 0 centre -> 1 bed edge
+                float bed  = WATER_Y - BED_DROP * (1.0f - bedT);
+
+                // Bank blend: 0 inside the channel, 1 once BANK_SPAN past the bed
+                // edge. Eases the carved bed back into the existing ground over a
+                // wide, smooth band (this is what kills the angular folds).
+                float bank   = glm::smoothstep(half_width, half_width + BANK_SPAN, d);
+                float carved = glm::mix(bed, heights(z,x), bank);
+
+                // A river only ever cuts DOWN; where the ground already sits below
+                // the carved profile, leave it (the crossover is where
+                // carved==ground, so the surface stays smooth there too).
+                if (carved < heights(z,x)) heights(z,x) = carved;
+
+                // Biome is for shading / unit speed / water queries ONLY. The mesh
+                // is shaped by the smooth height profile above, NOT by this flag,
+                // so a per-cell biome boundary no longer drives the visible edge.
+                if (d < half_width) biomes(z,x) = TerrainBiome::River;
+                else if (bank < 0.5f && biomes(z,x) == TerrainBiome::Grass)
+                    biomes(z,x) = TerrainBiome::Sand;
             }
         }
     }
@@ -472,11 +496,16 @@ public:
         }
     }
 
-    void build_mesh() {
-        std::vector<float> verts;
-        verts.reserve(GRID_SIZE * GRID_SIZE * 10);
-        std::vector<unsigned int> indices;
-        indices.reserve((GRID_SIZE-1)*(GRID_SIZE-1)*6);
+    // CPU vertex/index assembly. Safe on a worker thread (no GL). Stores into
+    // member vectors so the GL upload can happen later on the main thread.
+    std::vector<float> mesh_verts;
+    std::vector<unsigned int> mesh_indices;
+
+    void build_mesh_cpu() {
+        mesh_verts.clear();
+        mesh_verts.reserve(GRID_SIZE * GRID_SIZE * 10);
+        mesh_indices.clear();
+        mesh_indices.reserve((GRID_SIZE-1)*(GRID_SIZE-1)*6);
 
         for (int z = 0; z < GRID_SIZE; z++) {
             for (int x = 0; x < GRID_SIZE; x++) {
@@ -486,22 +515,21 @@ public:
                 float u = (float)x/(GRID_SIZE-1);
                 float v = (float)z/(GRID_SIZE-1);
                 float biome_f = (float)biomes(z,x);
-                // pos(3)+normal(3)+uv(2)+biome(1)+height(1) = 10
-                verts.insert(verts.end(), {wx, heights(z,x), wz, n.x,n.y,n.z, u,v, biome_f, heights(z,x)/MAX_HEIGHT});
+                mesh_verts.insert(mesh_verts.end(), {wx, heights(z,x), wz, n.x,n.y,n.z, u,v, biome_f, heights(z,x)/MAX_HEIGHT});
             }
         }
-
         for (int z = 0; z < GRID_SIZE-1; z++) {
             for (int x = 0; x < GRID_SIZE-1; x++) {
                 unsigned int tl = z*GRID_SIZE+x, tr=tl+1;
                 unsigned int bl = (z+1)*GRID_SIZE+x, br=bl+1;
-                indices.insert(indices.end(), {tl,bl,tr, tr,bl,br});
+                mesh_indices.insert(mesh_indices.end(), {tl,bl,tr, tr,bl,br});
             }
         }
-        index_count = (int)indices.size();
+        index_count = (int)mesh_indices.size();
+    }
 
-        // Free previous GPU buffers so re-generating the map (new seed/preset)
-        // doesn't leak VAO/VBO/EBO each time.
+    // GL upload of the CPU-built mesh. MUST run on the main thread.
+    void upload_mesh_gl() {
         if (ebo) { glDeleteBuffers(1, &ebo); ebo = 0; }
         if (vbo) { glDeleteBuffers(1, &vbo); vbo = 0; }
         if (vao) { glDeleteVertexArrays(1, &vao); vao = 0; }
@@ -510,8 +538,7 @@ public:
         glBindVertexArray(vao);
         glGenBuffers(1, &vbo);
         glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glBufferData(GL_ARRAY_BUFFER, verts.size()*sizeof(float), verts.data(), GL_STATIC_DRAW);
-        // layout: pos(0), normal(1), uv(2), biome(3), height_norm(4)
+        glBufferData(GL_ARRAY_BUFFER, mesh_verts.size()*sizeof(float), mesh_verts.data(), GL_STATIC_DRAW);
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 10*sizeof(float), (void*)0);
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 10*sizeof(float), (void*)(3*sizeof(float)));
@@ -525,8 +552,14 @@ public:
 
         glGenBuffers(1, &ebo);
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size()*sizeof(unsigned int), indices.data(), GL_STATIC_DRAW);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, mesh_indices.size()*sizeof(unsigned int), mesh_indices.data(), GL_STATIC_DRAW);
         glBindVertexArray(0);
     }
+
+    void build_mesh() {
+        build_mesh_cpu();
+        upload_mesh_gl();
+    }
 };
+
                                                                                                                                                                                                                                                                                                                                

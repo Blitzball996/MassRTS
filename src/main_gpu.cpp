@@ -479,12 +479,15 @@ int main(int argc, char* argv[]) {
     std::string net_mode;            // "host" or "join"
     std::string net_ip = "127.0.0.1";
     bool auto_survival = false;       // --survival: auto-start a survival run
+    bool auto_skirmdbg = false;       // --skirmdbg: auto-start a skirmish on the
+                                      // NORMAL render path (no orbit) for capture
     try {
         for (int ai = 1; ai < argc; ++ai) {
             std::string a = argv[ai];
             if (a == "--shots") g_shot_mode = true;
             else if (a == "--survival") auto_survival = true;
             else if (a == "--survmenu") g_survmenu_dbg = true;
+            else if (a == "--skirmdbg") auto_skirmdbg = true;
             else if (a == "--host") net_mode = "host";
             else if (a == "--join") { net_mode = "join"; if (ai+1 < argc && argv[ai+1][0] != '-') net_ip = argv[++ai]; }
         }
@@ -673,11 +676,14 @@ int main(int argc, char* argv[]) {
         // height-scaled maps and ends up looking up from under the ground).
         {
             glm::vec2 pbase = renderer.bases.bases[0].position;
-            float ground = renderer.terrain.get_height_at(pbase.x, pbase.y);
-            g_camera.target = glm::vec3(pbase.x, ground + 30.0f, pbase.y);
-            g_camera.distance = 420.0f;
-            g_camera.pitch = 42.0f;   // look down at the field
+            float ground = renderer.terrain.get_height_at(0.0f, 0.0f);
+            // Frame the playable land (map centre, which the presets flatten and
+            // raise) so the camera never stares at the surrounding low water.
+            g_camera.target = glm::vec3(0.0f, ground, 0.0f);
+            g_camera.distance = 900.0f;
+            g_camera.pitch = 50.0f;
             g_camera.yaw = 0.0f;
+            (void)pbase;
         }
 
         // Survival: arm the wave director and open the first build window.
@@ -734,6 +740,11 @@ int main(int argc, char* argv[]) {
     // --survival: jump straight into a survival run (skips the menu click).
     if (auto_survival) {
         g_game_state.mode = GameMode::Survival;
+        start_battle();
+    } else if (auto_skirmdbg) {
+        // DEBUG: skirmish on the NORMAL render path (no orbit) so the dbg capture
+        // block grabs a real Playing frame to compare against survival's.
+        g_game_state.mode = GameMode::Skirmish;
         start_battle();
     } else if (g_shot_mode) {
         // --shots without --survival: auto-start a skirmish so we can capture.
@@ -1833,9 +1844,17 @@ int main(int argc, char* argv[]) {
         }
 
         // DEBUG: capture normal gameplay ~3s into Playing to inspect blue-screen.
-        if (g_survmenu_dbg && g_game_state.phase == GamePhase::Playing) {
+        if ((g_survmenu_dbg || auto_survival || auto_skirmdbg || g_shot_mode) && g_game_state.phase == GamePhase::Playing) {
             static int dbgf = 0; dbgf++;
             if (dbgf == 180) save_screenshot("dbg_play.png", g_screen_w, g_screen_h);
+            if (dbgf == 181) { FILE* d=fopen("rdr_dbg.txt","w"); if(d){ glm::vec3 cp=g_camera.get_position();
+                unsigned char cpx[3]={0,0,0};
+                glReadPixels(g_screen_w/2, g_screen_h/2, 1,1, GL_RGB, GL_UNSIGNED_BYTE, cpx);
+                fprintf(d,"res=%dx%d sdf_verts=%ld ents=%u mode=%d campos=(%.0f,%.0f,%.0f) target=(%.0f,%.0f,%.0f) pitch=%.0f dist=%.0f center_px=(%d,%d,%d)\n",
+                g_screen_w,g_screen_h, renderer.sdf_terrain.total_vertices(), world.entity_count, (int)g_game_state.mode,
+                cp.x,cp.y,cp.z, g_camera.target.x,g_camera.target.y,g_camera.target.z,
+                g_camera.pitch, g_camera.distance, cpx[0],cpx[1],cpx[2]); fclose(d);} }
+            if (dbgf == 600) save_screenshot("dbg_play2.png", g_screen_w, g_screen_h);
         }
         glfwSwapBuffers(window);
     }

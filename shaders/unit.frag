@@ -9,6 +9,7 @@ in float v_fade;
 
 out vec4 frag_color;
 
+uniform vec3 u_cam_pos; // camera world pos (specular highlights)
 const vec3 SKIN = vec3(0.71, 0.53, 0.36);
 const vec3 SKIN_DARK = vec3(0.55, 0.40, 0.27);
 const vec3 EYE_WHITE = vec3(0.95, 0.95, 0.95);
@@ -109,19 +110,35 @@ void main() {
     }
     else if (part == 12) { base_color = STONE; }
 
-    // Lighting
-    vec3 light_dir = normalize(vec3(0.4, 0.85, 0.3));
+    // === Lighting: warm sun + cool sky ambient + spec for volume ===
+    vec3 light_dir = normalize(vec3(0.4, 0.82, 0.35));
+    vec3 sun_col = vec3(1.05, 1.02, 0.95);
     float NdotL = max(dot(n, light_dir), 0.0);
-    float ambient = 0.45;
-    float ao = 1.0;
-    if (n.y < -0.5) ao = 0.6;
-    else if (abs(n.x) > 0.5) ao = 0.82;
-    else if (n.z < -0.5) ao = 0.75;
 
-    vec3 lit = base_color * (ambient + NdotL * 0.55) * ao;
+    float hemi = n.y * 0.5 + 0.5;
+    vec3 ambient = mix(vec3(0.22, 0.20, 0.18), vec3(0.40, 0.48, 0.62), hemi) * 0.6;
+
+    float ao = 1.0;
+    if (n.y < -0.5) ao = 0.55;
+    else if (abs(n.x) > 0.5) ao = 0.80;
+    else if (n.z < -0.5) ao = 0.72;
+
+    vec3 lit = base_color * (ambient + sun_col * NdotL * 0.9) * ao;
+
+    // Specular: metals (armor/shield/turret) sharp, cloth soft. Catches the sun
+    // so soldiers read as solid volumes, not flat cards.
+    vec3 V = normalize(u_cam_pos - v_world_pos);
+    vec3 H = normalize(light_dir + V);
+    bool metal = (part == 6 || part == 7 || part == 11 || part == 12);
+    float spec = pow(max(dot(n, H), 0.0), metal ? 48.0 : 12.0) * NdotL;
+    lit += sun_col * spec * (metal ? 0.6 : 0.12);
+
+    // Sky rim light separates units from the ground.
+    float rim = pow(1.0 - max(dot(n, V), 0.0), 3.0) * 0.18;
+    lit += vec3(0.45, 0.52, 0.62) * rim;
 
     float dist = length(v_world_pos.xz) / 2500.0;
-    lit = mix(lit, vec3(0.55, 0.62, 0.68), clamp(dist * dist * 0.3, 0.0, 0.25));
+    lit = mix(lit, vec3(0.50, 0.57, 0.66), clamp(dist * dist * 0.25, 0.0, 0.20));
 
     frag_color = vec4(lit, v_fade); // LOD crossfade
 }

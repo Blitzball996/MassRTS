@@ -85,6 +85,57 @@ void main() {
         }
     }
 
+    // === RVO velocity avoidance (proactive) ===
+    // Before integrating, steer the velocity to avoid predicted collisions with
+    // neighbors. Reciprocal velocity obstacles: estimate time-to-collision from
+    // closing speed, and if a hit is imminent, steer perpendicular to slip past.
+    // This makes dense armies flow around each other instead of jittering after
+    // they already overlap (which is all the old separation-only code did).
+    vec2 my_vel = units[idx].velocity;
+    float my_speed = u.speed;
+    if ((u.state == 1u || u.state == 4u) && my_speed > 0.01) {
+        ivec2 rvo_cell = get_cell(u.position);
+        vec2 avoid = vec2(0.0);
+        const float SENSE = 14.0;
+        const float COMBINED_R = 3.6;
+        const float T_HORIZON = 2.0;
+        for (int dz = -1; dz <= 1; dz++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                int cx = rvo_cell.x + dx;
+                int cz = rvo_cell.y + dz;
+                if (cx < 0 || cx >= GRID_DIM || cz < 0 || cz >= GRID_DIM) continue;
+                int cell_id = cz * GRID_DIM + cx;
+                uint count = min(cell_counts[cell_id], uint(MAX_PER_CELL));
+                for (uint i = 0u; i < count; i++) {
+                    uint other = cell_entries[cell_id * MAX_PER_CELL + i];
+                    if (other == idx || other >= u_count) continue;
+                    vec2 rel_pos = units[other].position - u.position;
+                    float d = length(rel_pos);
+                    if (d < 0.01 || d > SENSE) continue;
+                    vec2 rel_vel = my_vel - units[other].velocity;
+                    float closing = dot(rel_pos, rel_vel) / d; // >0 = approaching
+                    if (closing <= 0.0) continue;
+                    float tc = (d - COMBINED_R) / closing;
+                    if (tc < 0.0 || tc > T_HORIZON) continue;
+                    // Steer perpendicular to the approach direction
+                    vec2 n = rel_pos / d;
+                    vec2 perp = vec2(-n.y, n.x);
+                    if (dot(perp, my_vel) < 0.0) perp = -perp; // keep momentum-aligned
+                    float urgency = 1.0 - (tc / T_HORIZON);
+                    avoid += perp * urgency;
+                }
+            }
+        }
+        if (length(avoid) > 0.001) {
+            vec2 steered = my_vel + avoid * my_speed * 0.6;
+            float sl = length(steered);
+            if (sl > my_speed * 1.4) steered = steered / sl * (my_speed * 1.4);
+            units[idx].velocity = steered;
+            // Keep facing the steered direction
+            if (sl > 0.01) units[idx].rotation = atan(steered.x, steered.y);
+        }
+    }
+
     // === Position integration (with terrain speed mult) ===
     float terrain_mult = u._pad2; // uploaded by CPU
     if (terrain_mult < 0.1) terrain_mult = 0.7; // safety

@@ -81,6 +81,8 @@ public:
     int ohgs = 0;
 
     void init(Terrain* terrain, float ws);
+    void init_cpu(Terrain* terrain, float ws); // heavy voxel fill — worker-safe (no GL)
+    void init_gl();                            // remesh -> GL upload — main thread only
     void carve(const CarveEvent& ev);
     void remesh_dirty();
     void render() {
@@ -90,6 +92,10 @@ public:
             glDrawArrays(GL_TRIANGLES, 0, c.vertex_count);
         }
         glBindVertexArray(0);
+    }
+    // DEBUG: total emitted terrain vertices across all chunks (0 = empty mesh).
+    long total_vertices() const {
+        long t = 0; for (auto& c : chunks) t += c.vertex_count; return t;
     }
     void cleanup() {
         for (auto& c : chunks) {
@@ -181,10 +187,20 @@ public:
 
     float original_height_at(float wx,float wz) const {
         if (orig_height.empty()) return 0.0f;
+        // BILINEAR sample. Nearest-neighbour here produced a stair-stepped
+        // surface reference; against the smooth marching-cubes mesh that made
+        // depth=(surf-p.y) read as a fake positive on uncarved slopes, tripping
+        // the subsurface dirt/rock override in terrain.frag -> dirty stripes
+        // smeared across snowy mountain slopes. Bilinear matches the smooth
+        // mesh, so flat ground keeps depth~0 and only real carves show strata.
         float fx=(wx/world_size+0.5f)*(ohgs-1), fz=(wz/world_size+0.5f)*(ohgs-1);
+        fx=std::clamp(fx,0.0f,(float)(ohgs-1)); fz=std::clamp(fz,0.0f,(float)(ohgs-1));
         int ix=(int)fx, iz=(int)fz;
-        ix=std::clamp(ix,0,ohgs-1); iz=std::clamp(iz,0,ohgs-1);
-        return orig_height[iz*ohgs+ix];
+        int ix1=std::min(ix+1,ohgs-1), iz1=std::min(iz+1,ohgs-1);
+        float tx=fx-ix, tz=fz-iz;
+        float h00=orig_height[(size_t)iz*ohgs+ix],  h10=orig_height[(size_t)iz*ohgs+ix1];
+        float h01=orig_height[(size_t)iz1*ohgs+ix], h11=orig_height[(size_t)iz1*ohgs+ix1];
+        return (h00*(1.0f-tx)+h10*tx)*(1.0f-tz) + (h01*(1.0f-tx)+h11*tx)*tz;
     }
 
     // ====================================================================
@@ -256,7 +272,7 @@ inline float SDFTerrain::analytic_field(float wx, float wy, float wz) const {
     return fmaxf(d_top, d_bot);
 }
 
-inline void SDFTerrain::init(Terrain* terrain, float ws) {
+inline void SDFTerrain::init_cpu(Terrain* terrain, float ws) {
     legacy_terrain = terrain;
     world_size = ws;
     chunks_x = (int)ceilf(world_size / (chunk_size*voxel_size));
@@ -271,7 +287,15 @@ inline void SDFTerrain::init(Terrain* terrain, float ws) {
     orig_height.resize((size_t)ohgs*ohgs);
     for (int z=0; z<ohgs; z++) for (int x=0; x<ohgs; x++)
         orig_height[z*ohgs+x] = terrain->heights(z,x);
+}
+
+inline void SDFTerrain::init_gl() {
     remesh_dirty();
+}
+
+inline void SDFTerrain::init(Terrain* terrain, float ws) {
+    init_cpu(terrain, ws);
+    init_gl();
 }
 
 inline void SDFTerrain::carve(const CarveEvent& ev) {

@@ -10,7 +10,16 @@ uniform float u_time;
 uniform vec3 u_cam_pos; // camera world pos (water Fresnel/reflection)
 
 // Noise
-float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
+// Precision-stable hash. The old sin(dot(p,...))*43758 version produced regular
+// grid-aligned STRIPES on the ground because terrain is sampled at world coords
+// up to ~6000 (noise(wpos*2.0)), where the huge sin argument loses float32
+// precision and degenerates into banding. This fract-based hash (Dave Hoskins)
+// stays bounded and artifact-free at any coordinate magnitude.
+float hash(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
 float noise(vec2 p) {
     vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
     return mix(mix(hash(i),hash(i+vec2(1,0)),f.x), mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);
@@ -236,7 +245,7 @@ void main() {
     // original ground) drives the transition grass -> dirt -> rock using a
     // CONTINUOUS channel, so no phantom-biome colour stripes appear.
     float depth = v_height_norm;
-    if (depth > 0.5) {
+    if (depth > 1.5) {
         // Dirt layer: earthy gray-brown.
         vec3 dirt_a = vec3(0.34, 0.29, 0.24);
         vec3 dirt_b = vec3(0.26, 0.23, 0.20);
@@ -255,8 +264,8 @@ void main() {
         float vein = smoothstep(0.8, 0.92, noise(wpos * 0.3 + v_world_pos.y * 0.2));
         rock = mix(rock, vec3(0.58,0.58,0.60), vein * 0.25);
 
-        // grass(top) -> dirt over [0.5,4], dirt -> rock over [10,18].
-        float toDirt = smoothstep(0.5, 4.0, depth);
+        // grass(top) -> dirt over [1.5,5], dirt -> rock over [10,18].
+        float toDirt = smoothstep(1.5, 5.0, depth);
         float toRock = smoothstep(10.0, 18.0, depth);
         vec3 strata = mix(dirt, rock, toRock);
         base = mix(base, strata, toDirt);
@@ -267,41 +276,44 @@ void main() {
     }
 
     // === Global lighting ===
-    vec3 sun_dir = normalize(vec3(0.4, 0.85, 0.3));
+    // Warm directional sun + cool sky ambient gives the scene volume and a
+    // colour temperature split (instead of flat white light from everywhere).
+    vec3 sun_dir = normalize(vec3(0.4, 0.82, 0.35));
+    vec3 sun_col = vec3(1.05, 1.02, 0.95);   // near-neutral daylight (slight warmth)
+    vec3 sky_col = vec3(0.45, 0.54, 0.68);   // cool sky fill
     float NdotL = max(dot(n, sun_dir), 0.0);
-    float ambient = 0.35;
-    float diffuse = NdotL * 0.55;
+    // Soft wrap so terrain doesn't go pure black on the shadow side.
+    float wrap = NdotL * 0.5 + 0.5;
+    float diffuse = NdotL;
+    // Hemispheric ambient: ground-up vs sky-down, tinted cool.
+    float hemi = dot(n, vec3(0,1,0)) * 0.5 + 0.5;
+    vec3 ambient = mix(vec3(0.20,0.19,0.17), sky_col, hemi) * 0.55;
 
-    // Indirect bounce (sky)
-    float sky_ambient = max(dot(n, vec3(0,1,0)), 0.0) * 0.1;
+    vec3 color = base * (ambient + sun_col * diffuse * 0.85);
 
-    vec3 color = base * (ambient + diffuse + sky_ambient);
-
-    // Shadow approximation from height
+    // Soft self-shadow term (height noise) — deepen for real contrast.
     float shadow_height = fbm5(wpos * 0.003 + vec2(2.0));
-    float shadow = smoothstep(0.3, 0.5, shadow_height) * 0.15;
+    float shadow = smoothstep(0.3, 0.55, shadow_height) * 0.28;
     color *= (1.0 - shadow);
 
-    // Ambient occlusion from concavity
+    // Ambient occlusion from concavity / depth.
     float ao = smoothstep(-2.0, 8.0, v_world_pos.y) * 0.3 + 0.7;
     color *= ao;
 
-    // Atmospheric fog (exponential, CAMERA-relative). The old version measured
-    // distance from the world origin, so fog density was independent of where
-    // you actually stood and far terrain met the sky with a hard seam. Using
-    // the true camera distance and tinting toward the sky's horizon colour lets
-    // distant ground dissolve smoothly into the procedural sky.
+    // Atmospheric fog — DRAMATICALLY lighter than before. The old 0.00035 /
+    // 0.65-clamp saturated across the whole battlefield and washed everything
+    // to bright gray (the "惨白" look). At this camera scale a much smaller
+    // coefficient keeps near terrain crisp and only veils the far horizon.
     float dist = length(v_world_pos - u_cam_pos);
-    float fog_amount = 1.0 - exp(-dist * 0.00035);
-    vec3 horizon = vec3(0.62, 0.70, 0.80);
-    vec3 ground_haze = vec3(0.50, 0.56, 0.62);
+    float fog_amount = 1.0 - exp(-dist * 0.00009);
+    vec3 horizon = vec3(0.55, 0.64, 0.76);
+    vec3 ground_haze = vec3(0.46, 0.52, 0.60);
     vec3 fog_color = mix(ground_haze, horizon, clamp(v_world_pos.y / 60.0, 0.0, 1.0));
-    color = mix(color, fog_color, clamp(fog_amount, 0.0, 0.65));
+    color = mix(color, fog_color, clamp(fog_amount, 0.0, 0.42));
 
-    // Height-based cool shift only for terrain ABOVE sea level; subsurface
-    // (carved) areas must stay neutral gray, never bluish.
+    // Slight cool shift on high ground only.
     float above = clamp(v_world_pos.y / 80.0, 0.0, 1.0);
-    color = mix(color, color * vec3(0.92, 0.96, 1.04), above * 0.15);
+    color = mix(color, color * vec3(0.94, 0.97, 1.03), above * 0.12);
 
     frag_color = vec4(color, 1.0);
 }

@@ -231,6 +231,14 @@ public:
     }
 
     // Buy batch of units
+    // Effective metal cost of a shop entry for the player (Red), including the
+    // survival "cheaper units" roguelite multiplier. Used by build-preview UI.
+    int unit_cost_for(int shop_index) const {
+        int cost = UNIT_SHOP[shop_index].cost;
+        if (rl_player_cost_mult != 1.0f) cost = std::max(1, (int)(cost * rl_player_cost_mult));
+        return cost;
+    }
+
     int buy_batch(int shop_index, int count, glm::vec2 center, Faction faction) {
         int bought = 0;
         int cols = std::max(1, (int)sqrt((float)count));

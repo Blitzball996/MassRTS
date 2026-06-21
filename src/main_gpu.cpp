@@ -62,6 +62,9 @@ Renderer* g_renderer = nullptr;
 
 // Nuke targeting mode
 bool g_nuke_targeting = false;
+// Survival build-placement: when armed, the next ground click builds the chosen
+// static defense (wall/turret) at the cursor instead of spawning at the base.
+int  g_build_place_shop = -1;   // shop index being placed, or -1 = inactive
 // Game state machine
 GameState g_game_state;
 // Survival / roguelite wave director (only active when mode == Survival).
@@ -214,6 +217,17 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
                 world.score[0] -= world.nuke_cost;
                 world.nuke_ready[0] = (world.score[0] >= world.nuke_cost);
                 g_nuke_targeting = false;
+                return;
+            }
+
+            // Survival build placement: left click builds the armed defense at
+            // the cursor and consumes the click (no selection box).
+            if (g_build_place_shop >= 0 && !g_sculpt_mode) {
+                Ray ray = g_camera.screen_to_ray((float)mx, (float)my, g_screen_w, g_screen_h);
+                glm::vec2 gp = g_camera.ray_to_ground(ray);
+                int built = g_world->buy_batch(g_build_place_shop, 1, gp, Faction::Red);
+                // Out of metal -> disarm; otherwise stay armed for rapid laying.
+                if (built <= 0) g_build_place_shop = -1;
                 return;
             }
 
@@ -804,6 +818,10 @@ int main(int argc, char* argv[]) {
             static bool esc_prev = false;
             bool esc_now = (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS);
             if (esc_now && !esc_prev) {
+                // ESC first cancels an armed build placement, then pauses.
+                if (g_game_state.phase == GamePhase::Playing && g_build_place_shop >= 0) {
+                    g_build_place_shop = -1;
+                } else
                 switch (g_game_state.phase) {
                     case GamePhase::Playing:
                         g_game_state.phase = GamePhase::Paused;
@@ -1322,6 +1340,21 @@ int main(int argc, char* argv[]) {
             glDisable(GL_BLEND);
         }
 
+        // Survival build-placement preview: a green footprint ring at the cursor
+        // showing where the armed wall/turret will be built.
+        if (g_game_state.phase == GamePhase::Playing &&
+            g_game_state.mode == GameMode::Survival && g_build_place_shop >= 0 &&
+            !g_sculpt_mode) {
+            double qmx, qmy; glfwGetCursorPos(window, &qmx, &qmy);
+            Ray qray = g_camera.screen_to_ray((float)qmx, (float)qmy, g_screen_w, g_screen_h);
+            glm::vec2 qgp = g_camera.ray_to_ground(qray);
+            bool affordable = (world.money[0] >= world.unit_cost_for(g_build_place_shop));
+            glm::vec3 col = affordable ? glm::vec3(0.3f, 1.0f, 0.4f) : glm::vec3(1.0f, 0.3f, 0.2f);
+            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            renderer.render_brush_ring(view, proj, qgp, 14.0f, col);
+            glDisable(GL_BLEND);
+        }
+
         // Survival PREP preview: pulse warning rings where the NEXT wave's nests
         // will erupt, so the player can place defenses / sculpt terrain there.
         if (g_game_state.phase == GamePhase::Playing &&
@@ -1367,10 +1400,26 @@ int main(int argc, char* argv[]) {
                                                        shop_names, shop_costs, 9,
                                                        world.money[0], g_buy_count);
             if (shop_result >= 0) {
-                glm::vec2 spawn = g_renderer->bases.bases[0].position;
-                int bought = world.buy_batch(shop_result, g_buy_count, spawn, Faction::Red);
-                if (bought > 0) { }
+                // Survival: walls (7) and turrets (8) are placed at the cursor so
+                // players can build a fortress around the incoming nest lanes.
+                bool is_defense = (shop_result == 7 || shop_result == 8);
+                if (g_game_state.mode == GameMode::Survival && is_defense) {
+                    g_build_place_shop = shop_result; // arm placement; next click builds
+                } else {
+                    glm::vec2 spawn = g_renderer->bases.bases[0].position;
+                    int bought = world.buy_batch(shop_result, g_buy_count, spawn, Faction::Red);
+                    if (bought > 0) { }
+                }
             }
+        }
+
+        // === Survival build placement: RMB cancels the armed defense. The
+        // actual build happens in the mouse callback so it consumes the click
+        // (the left-click never leaks into a selection box). ===
+        if (g_game_state.phase == GamePhase::Playing &&
+            g_game_state.mode == GameMode::Survival && g_build_place_shop >= 0) {
+            if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)
+                g_build_place_shop = -1;
         }
 
         // === Survival HUD banner + roguelite draft overlay ===
@@ -1383,6 +1432,16 @@ int main(int argc, char* argv[]) {
                                           g_game_state.hud_enemies_left,
                                           g_game_state.hud_nests_alive,
                                           wd.difficulty_tier);
+            // Build-placement hint when a wall/turret is armed.
+            if (g_build_place_shop >= 0) {
+                g_menu.begin_2d();
+                const char* what = (g_build_place_shop == 8) ? "TURRET" : "WALL";
+                char hint[64];
+                snprintf(hint, sizeof(hint), "PLACING %s - CLICK GROUND  (ESC/RMB CANCEL)", what);
+                g_menu.draw_text_centered(hint, g_screen_w * 0.5f, g_screen_h - 70.0f, 1.7f,
+                                          {0.4f, 1.0f, 0.5f, 1.0f});
+                g_menu.end_2d();
+            }
             // SPACE skips the prep window.
             if (wd.phase == SurvivalPhase::Prep) {
                 static bool space_prev = false;

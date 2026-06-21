@@ -658,6 +658,20 @@ int main(int argc, char* argv[]) {
         combat->rebuild_grid(world);
         renderer.gpu_compute.upload_units(world);
         g_game_state.phase = GamePhase::Playing;
+
+        // Reposition the camera to look at the player's base, sitting safely
+        // ABOVE the local terrain so it never starts buried under a mountain
+        // (the startup default target.y was a fixed 20 which clips into tall
+        // height-scaled maps and ends up looking up from under the ground).
+        {
+            glm::vec2 pbase = renderer.bases.bases[0].position;
+            float ground = renderer.terrain.get_height_at(pbase.x, pbase.y);
+            g_camera.target = glm::vec3(pbase.x, ground + 30.0f, pbase.y);
+            g_camera.distance = 420.0f;
+            g_camera.pitch = 42.0f;   // look down at the field
+            g_camera.yaw = 0.0f;
+        }
+
         // Survival: arm the wave director and open the first build window.
         if (g_game_state.mode == GameMode::Survival) {
             glm::vec2 base = renderer.bases.bases[0].position;
@@ -712,6 +726,10 @@ int main(int argc, char* argv[]) {
     // --survival: jump straight into a survival run (skips the menu click).
     if (auto_survival) {
         g_game_state.mode = GameMode::Survival;
+        start_battle();
+    } else if (g_shot_mode) {
+        // --shots without --survival: auto-start a skirmish so we can capture.
+        g_game_state.mode = GameMode::Skirmish;
         start_battle();
     }
 
@@ -1539,7 +1557,6 @@ int main(int argc, char* argv[]) {
             }
             menu_was_pressed = lmb;
         } else if (g_game_state.phase == GamePhase::MapSelect) {
-        } else if (g_game_state.phase == GamePhase::MapSelect) {
             double mmx, mmy; glfwGetCursorPos(window, &mmx, &mmy);
             g_menu.screen_w = g_screen_w; g_menu.screen_h = g_screen_h;
             g_menu.render_map_select(g_game_state, (float)mmx, (float)mmy);
@@ -1774,15 +1791,21 @@ int main(int argc, char* argv[]) {
                 { 30.0f, 80.0f, 1600.0f,    0,    0, "shot_5_topdown"   },
             };
             const int NSHOTS = (int)(sizeof(shots)/sizeof(shots[0]));
-            sframe++;
+            // Only advance the shot sequence once the battle is actually live
+            // (terrain + units uploaded). Counting during Loading captured empty
+            // clear-color frames before finalize_battle ran.
+            if (g_game_state.phase == GamePhase::Playing) sframe++;
             if (sframe > g_shot_warmup) {
                 int local = (sframe - g_shot_warmup) % 12;
                 if (local == 0 && shot_idx < NSHOTS) {
                     const Shot& s = shots[shot_idx];
-                    g_camera.yaw = glm::radians(s.yaw);
-                    g_camera.pitch = glm::radians(s.pitch);
+                    // Camera yaw/pitch are stored in DEGREES (get_position does
+                    // the radians() conversion), so assign the preset directly.
+                    g_camera.yaw = s.yaw;
+                    g_camera.pitch = s.pitch;
                     g_camera.distance = s.dist;
-                    g_camera.target = glm::vec3(s.tx, 0, s.tz);
+                    float gy = renderer.terrain.get_height_at(s.tx, s.tz);
+                    g_camera.target = glm::vec3(s.tx, gy + 30.0f, s.tz);
                 } else if (local == 8 && shot_idx < NSHOTS) {
                     char path[256];
                     std::snprintf(path, sizeof(path), "%s.png", shots[shot_idx].name);

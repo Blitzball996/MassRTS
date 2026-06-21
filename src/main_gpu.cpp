@@ -369,6 +369,12 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
         }
     }
 
+    // K: toggle battlefield blood splats (default OFF). Corpses always remain.
+    if (key == GLFW_KEY_K && g_renderer) {
+        g_renderer->corpses.blood_enabled = !g_renderer->corpses.blood_enabled;
+        std::cout << "[Blood] " << (g_renderer->corpses.blood_enabled ? "ON" : "OFF") << "\n";
+    }
+
     // +/- change batch size
     if (key == GLFW_KEY_EQUAL) g_buy_count = std::min(5000, g_buy_count + 500);
     if (key == GLFW_KEY_MINUS) g_buy_count = std::max(100, g_buy_count - 500);
@@ -1397,6 +1403,7 @@ int main(int argc, char* argv[]) {
         if (g_game_state.phase == GamePhase::Playing ||
             g_game_state.phase == GamePhase::Victory ||
             g_game_state.phase == GamePhase::Defeat) {
+            hud.survival_mode = (g_game_state.mode == GameMode::Survival);
             hud.render();
         }
 

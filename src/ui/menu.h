@@ -860,7 +860,7 @@ void main() { frag = u_color; }
         begin_2d();
         float cx = screen_w * 0.5f;
         // Banner panel
-        float bw = 420, bh = 56, bx = cx - bw*0.5f, by = 50;
+        float bw = 420, bh = 56, bx = cx - bw*0.5f, by = 90;
         draw_rect(bx, by, bw, bh, {0.06f, 0.03f, 0.09f, 0.85f});
         draw_rect(bx, by, bw, 3, {0.9f, 0.25f, 0.6f, 0.95f});
         char buf[64];

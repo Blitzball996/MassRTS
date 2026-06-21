@@ -22,6 +22,9 @@ public:
     int money = 0;
     int buy_count = 1000;
     bool nuke_ready = false;
+    // Survival mode: hide the skirmish-only score/nuke box (the survival banner
+    // owns the top-center) to avoid the HUD overlap.
+    bool survival_mode = false;
     // Sculpt HUD state (set each frame from main loop)
     bool sculpt_mode = false;
     int  sculpt_brush = 1;   // 0=Raise 1=Dig 2=Smooth 3=Flatten
@@ -97,6 +100,7 @@ void main() { frag = u_color; }
         // === SCORE & NUKE INDICATOR ===
         float score_x = (float)screen_w * 0.5f - 80;
         float score_y = 50;
+        if (!survival_mode) {
         draw_rect(score_x, score_y, 160, 30, {0.08f, 0.05f, 0.02f, 0.8f});
         // Score progress bar toward nuke
         float nuke_progress = glm::clamp((float)score / (float)nuke_cost, 0.0f, 1.0f);
@@ -112,7 +116,7 @@ void main() { frag = u_color; }
             draw_rect(score_x + 152, score_y + 5, 3, 20, {1.0f, 0.4f, 0.0f, 1.0f});
             draw_rect(score_x + 143, score_y + 5, 9, 3, {1.0f, 0.4f, 0.0f, 1.0f});
         }
-
+        } // end !survival_mode (score/nuke box)
         // Selection panel
         if (selected_count > 0) {
             float pw = 220, ph = 55;

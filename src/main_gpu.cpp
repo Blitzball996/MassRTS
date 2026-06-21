@@ -468,6 +468,7 @@ void spawn_army(World& world, Faction faction, glm::vec2 center, int count,
 // terrain be inspected from multiple viewpoints without manual piloting.
 static bool g_shot_mode = false;
 static int  g_shot_warmup = 90; // frames to let terrain mesh/settle first
+static bool g_survmenu_dbg = false; // DEBUG: drive menu->setup->START path
 
 int main(int argc, char* argv[]) {
     // EARLY diagnostic: write to verify main() runs and file I/O works.
@@ -483,6 +484,7 @@ int main(int argc, char* argv[]) {
             std::string a = argv[ai];
             if (a == "--shots") g_shot_mode = true;
             else if (a == "--survival") auto_survival = true;
+            else if (a == "--survmenu") g_survmenu_dbg = true;
             else if (a == "--host") net_mode = "host";
             else if (a == "--join") { net_mode = "join"; if (ai+1 < argc && argv[ai+1][0] != '-') net_ip = argv[++ai]; }
         }
@@ -737,6 +739,10 @@ int main(int argc, char* argv[]) {
         // --shots without --survival: auto-start a skirmish so we can capture.
         g_game_state.mode = GameMode::Skirmish;
         start_battle();
+    } else if (g_survmenu_dbg) {
+        // DEBUG: exercise the exact menu->setup->START path (reproduces the
+        // player's survival entry, which --survival bypasses).
+        g_game_state.survival_setup_open = true;
     }
 
     // === Reveal the window with the menu already drawn ===
@@ -1526,6 +1532,9 @@ int main(int argc, char* argv[]) {
                     g_game_state, (float)mmx, (float)mmy, click_edge,
                     g_meta.unlocked_tier, g_meta.best_wave, g_meta.best_tier,
                     g_meta.runs_played, g_meta.meta_points);
+                // DEBUG: auto-press START after a few frames to reproduce the
+                // menu-driven survival entry without a real mouse.
+                if (g_survmenu_dbg) { static int sf=0; if(++sf==30) act=1; }
                 if (act == 3) { // tier -
                     audio.play_click();
                     g_game_state.survival_tier = std::max(1, g_game_state.survival_tier - 1);
@@ -1823,6 +1832,11 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // DEBUG: capture normal gameplay ~3s into Playing to inspect blue-screen.
+        if (g_survmenu_dbg && g_game_state.phase == GamePhase::Playing) {
+            static int dbgf = 0; dbgf++;
+            if (dbgf == 180) save_screenshot("dbg_play.png", g_screen_w, g_screen_h);
+        }
         glfwSwapBuffers(window);
     }
 

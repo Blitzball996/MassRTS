@@ -691,6 +691,8 @@ int main(int argc, char* argv[]) {
     // Load cross-run survival progression (unlocks, best results) before any
     // run can start. Defaults are kept if the save file is absent.
     g_meta.load();
+    // Load data-driven wave/balance tuning (BAR-style: balance lives in data).
+    g_wave_director.load_config();
     g_game_state.survival_tier = std::min(g_game_state.survival_tier, g_meta.unlocked_tier);
 
     // --survival: jump straight into a survival run (skips the menu click).

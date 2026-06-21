@@ -16,12 +16,39 @@
 // ============================================================================
 #include "../ecs/world.h"
 #include "../ecs/components.h"
+#include "../core/json.h"
 #include <glm/glm.hpp>
 #include <vector>
 #include <string>
 #include <random>
 #include <cmath>
 #include <cstdint>
+
+// ----------------------------------------------------------------------------
+//  Data-driven tuning (BAR-style: balance lives in data, not code).
+//  Loaded from survival_waves.json next to the exe; every field falls back to a
+//  hardcoded default if the file is missing or a key is absent, so the game
+//  always runs and designers/modders can re-tune without recompiling.
+// ----------------------------------------------------------------------------
+struct WaveConfig {
+    // difficulty curve (see wave_enemy_count / wave_hp_scale / wave_dmg_scale)
+    float count_base       = 40.0f;
+    float count_per_wave   = 28.0f;
+    float count_per_wave_sq= 3.0f;
+    float count_tier_mul   = 0.25f;  // applied as (0.8 + tier_mul * tier)
+    float hp_per_wave      = 0.06f;
+    float hp_per_tier      = 0.10f;
+    float dmg_per_wave     = 0.04f;
+    float dmg_per_tier     = 0.08f;
+    int   nest_max         = 6;
+    float prep_time        = 30.0f;
+    float prep_grant       = 250.0f; // free build budget each prep
+    float spawn_rate_base  = 8.0f;   // units/sec across nests
+    float spawn_rate_per_wave = 1.5f;
+    float nest_hp_base     = 3000.0f;
+    float nest_hp_per_wave = 600.0f;
+    float nest_hp_per_tier = 1500.0f;
+};
 
 // Sub-phase of a survival run. The outer GamePhase stays Playing; the director
 // owns this finer state machine so the existing menu/pause/loading flow is
@@ -108,6 +135,81 @@ public:
     float world_size = 3000.0f;
     std::mt19937 rng;
 
+    // Data-driven tuning (loaded from survival_waves.json; defaults otherwise).
+    WaveConfig cfg;
+
+    // Load balance config from disk. Tolerant: missing file / keys keep
+    // defaults. Call once at startup (before start_run). Tries several paths so
+    // it works from the repo root or the build/Release dir.
+    void load_config(const std::string& override_path = "") {
+        const char* candidates[] = {
+            "assets/survival_waves.json", "../assets/survival_waves.json",
+            "../../assets/survival_waves.json", "survival_waves.json"
+        };
+        JsonValue root;
+        if (!override_path.empty()) {
+            root = JsonParser::parse_file(override_path);
+        } else {
+            for (const char* path : candidates) {
+                root = JsonParser::parse_file(path);
+                if (root.is_object()) break;
+            }
+        }
+        if (!root.is_object()) return; // file absent -> keep defaults
+        const JsonValue& w = root["wave"];
+        if (w.type == JsonValue::Object) {
+            cfg.count_base        = (float)w["count_base"].as_number(cfg.count_base);
+            cfg.count_per_wave    = (float)w["count_per_wave"].as_number(cfg.count_per_wave);
+            cfg.count_per_wave_sq = (float)w["count_per_wave_sq"].as_number(cfg.count_per_wave_sq);
+            cfg.count_tier_mul    = (float)w["count_tier_mul"].as_number(cfg.count_tier_mul);
+            cfg.hp_per_wave       = (float)w["hp_per_wave"].as_number(cfg.hp_per_wave);
+            cfg.hp_per_tier       = (float)w["hp_per_tier"].as_number(cfg.hp_per_tier);
+            cfg.dmg_per_wave      = (float)w["dmg_per_wave"].as_number(cfg.dmg_per_wave);
+            cfg.dmg_per_tier      = (float)w["dmg_per_tier"].as_number(cfg.dmg_per_tier);
+            cfg.nest_max          = (int)w["nest_max"].as_number(cfg.nest_max);
+            cfg.prep_time         = (float)w["prep_time"].as_number(cfg.prep_time);
+            cfg.prep_grant        = (float)w["prep_grant"].as_number(cfg.prep_grant);
+            cfg.spawn_rate_base   = (float)w["spawn_rate_base"].as_number(cfg.spawn_rate_base);
+            cfg.spawn_rate_per_wave = (float)w["spawn_rate_per_wave"].as_number(cfg.spawn_rate_per_wave);
+            cfg.nest_hp_base      = (float)w["nest_hp_base"].as_number(cfg.nest_hp_base);
+            cfg.nest_hp_per_wave  = (float)w["nest_hp_per_wave"].as_number(cfg.nest_hp_per_wave);
+            cfg.nest_hp_per_tier  = (float)w["nest_hp_per_tier"].as_number(cfg.nest_hp_per_tier);
+        }
+        // Optional designer-defined card pool overrides the built-in one.
+        const JsonValue& cards = root["cards"];
+        if (cards.type == JsonValue::Array && !cards.arr.empty()) {
+            custom_cards.clear();
+            for (const auto& c : cards.arr) {
+                Modifier m;
+                std::string k = c["kind"].as_string("Income");
+                m.kind = kind_from_string(k);
+                m.name = c["name"].as_string("Upgrade");
+                m.desc = c["desc"].as_string("");
+                m.value = (float)c["value"].as_number(1.0);
+                custom_cards.push_back(m);
+            }
+        }
+    }
+
+    static ModKind kind_from_string(const std::string& s) {
+        if (s == "Income")      return ModKind::Income;
+        if (s == "StartCash")   return ModKind::StartCash;
+        if (s == "TurretPower") return ModKind::TurretPower;
+        if (s == "UnitHP")      return ModKind::UnitHP;
+        if (s == "UnitDamage")  return ModKind::UnitDamage;
+        if (s == "CarveBudget") return ModKind::CarveBudget;
+        if (s == "BaseRepair")  return ModKind::BaseRepair;
+        if (s == "KillBounty")  return ModKind::KillBounty;
+        if (s == "CheapUnits")  return ModKind::CheapUnits;
+        return ModKind::Income;
+    }
+
+    // Designer-supplied cards from JSON; empty -> use the built-in card_pool().
+    std::vector<Modifier> custom_cards;
+    const std::vector<Modifier>& active_pool() const {
+        return custom_cards.empty() ? card_pool() : custom_cards;
+    }
+
     // ----- pool of all possible upgrade cards -----
     static const std::vector<Modifier>& card_pool() {
         static const std::vector<Modifier> pool = {
@@ -133,7 +235,7 @@ public:
         rng.seed(seed);
         phase = SurvivalPhase::Prep;
         wave = 0;
-        prep_time = 30.0f;
+        prep_time = cfg.prep_time;
         prep_timer = prep_time;
         prep_skip = false;
         combat_timer = 0.0f;
@@ -155,17 +257,18 @@ public:
     // Per-wave enemy budget. Ramps count, and (via prep) HP/damage scale with
     // tier and wave so the curve keeps biting. Pure function of (wave, tier).
     int wave_enemy_count(int w) const {
-        float base = 40.0f + w * 28.0f + (float)(w * w) * 3.0f;
-        return (int)(base * (0.8f + 0.25f * difficulty_tier));
+        float base = cfg.count_base + w * cfg.count_per_wave
+                   + (float)(w * w) * cfg.count_per_wave_sq;
+        return (int)(base * (0.8f + cfg.count_tier_mul * difficulty_tier));
     }
     float wave_hp_scale(int w) const {
-        return (1.0f + 0.06f * (w - 1)) * (1.0f + 0.10f * (difficulty_tier - 1));
+        return (1.0f + cfg.hp_per_wave * (w - 1)) * (1.0f + cfg.hp_per_tier * (difficulty_tier - 1));
     }
     float wave_dmg_scale(int w) const {
-        return (1.0f + 0.04f * (w - 1)) * (1.0f + 0.08f * (difficulty_tier - 1));
+        return (1.0f + cfg.dmg_per_wave * (w - 1)) * (1.0f + cfg.dmg_per_tier * (difficulty_tier - 1));
     }
     int num_nests_for_wave(int w) const {
-        return std::min(6, 1 + w / 3 + (difficulty_tier - 1) / 2);
+        return std::min(cfg.nest_max, 1 + w / 3 + (difficulty_tier - 1) / 2);
     }
 
     // Composition shifts toward heavier units as waves climb.
@@ -190,7 +293,7 @@ public:
         prep_timer = prep_time;
         prep_skip = false;
         // Hand the player a build budget so prep is meaningful even broke.
-        int grant = 250 + carve_budget_bonus;
+        int grant = (int)cfg.prep_grant + carve_budget_bonus;
         world.money[0] += grant;
     }
 
@@ -240,7 +343,8 @@ public:
         for (auto& p : pos) {
             Nest n;
             n.pos = p;
-            n.max_health = n.health = 3000.0f + 600.0f * wave + 1500.0f * (difficulty_tier - 1);
+            n.max_health = n.health = cfg.nest_hp_base + cfg.nest_hp_per_wave * wave
+                                    + cfg.nest_hp_per_tier * (difficulty_tier - 1);
             n.alive = true;
             n.spawn_accum = 0.0f;
             nests.push_back(n);
@@ -337,7 +441,7 @@ public:
 
         if (enemies_to_spawn > 0 && live_nests > 0) {
             // Spawn rate scales with wave so big waves don't take forever.
-            float rate = 8.0f + wave * 1.5f; // units/sec across all nests
+            float rate = cfg.spawn_rate_base + wave * cfg.spawn_rate_per_wave; // units/sec across all nests
             spawn_drip += rate * dt;
             int batch = (int)spawn_drip;
             if (batch > 0) {
@@ -397,7 +501,7 @@ public:
 
     // ===== draft =====
     void roll_draft() {
-        const auto& pool = card_pool();
+        const auto& pool = active_pool();
         // pick 3 distinct cards
         int picks[3] = {-1, -1, -1};
         for (int i = 0; i < 3; i++) {

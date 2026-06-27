@@ -314,9 +314,7 @@ public:
     // caller can award drops. Smooth-min blends a rounded bowl into the field.
     void carve_sphere(float cx, float cy, float cz, float radius, int op,
                       std::vector<std::array<int,4>>* flips = nullptr) {
-        float k = radius * 0.9f;             // smooth-blend width (wider = rounder,
-        // more eroded-looking holes; softer rims; overlapping digs merge without
-        // leaving the sharp "尖尖" spikes/creases between them).
+        float k = radius * 0.5f;             // smooth-blend width
         float reach = radius + k + 1.0f;
         int x0 = (int)std::floor(cx - reach), x1 = (int)std::ceil(cx + reach);
         int y0 = (int)std::floor(cy - reach), y1 = (int)std::ceil(cy + reach);
@@ -332,6 +330,15 @@ public:
                 float cur = sdf_at(wx, wy, wz);
                 float nv = (op < 0) ? smax(cur, -sphere, k)   // dig: union with air
                                     : smin(cur,  sphere, k);  // fill: union with solid
+                // ANTI-PLATEAU (the flat grey "sheet" fix). The dig smax(cur,
+                // -sphere) raises a SOLID cell toward -sphere even when it sits
+                // OUTSIDE the air sphere — e.g. a deep cell at cur=-30 becomes
+                // -1.9. Repeated/overlapping digs keep lifting the field toward
+                // zero until a whole region hovers near 0, which Marching Cubes
+                // then meshes as flat sheets/slabs hanging in the hole. Fix: do
+                // NOT modify solid cells outside the sphere — the hole is exactly
+                // sphere∩terrain, no lifted shell, no near-zero plateau, no sheet.
+                if (op < 0 && sphere > 0.0f && cur < 0.0f) nv = cur;
                 ChunkKey kk = world_to_chunk(wx, wz);
                 Chunk* c = get_chunk(kk, true);
                 int lx = floormod(wx, CHUNK_SX), lz = floormod(wz, CHUNK_SZ);

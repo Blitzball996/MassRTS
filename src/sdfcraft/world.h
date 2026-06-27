@@ -184,6 +184,13 @@ public:
     int surface_height(int wx, int wz) {
         return (int)surface_height_f((float)wx, (float)wz);
     }
+    // Public accessor for this column's biome surface block (grass / snow / sand),
+    // forwarding to the private surface_block(). The MC mesher uses it to paint
+    // the natural top surface with exactly the material the generator placed,
+    // avoiding voxel-sample fall-through that produced dirt veins on the lawn.
+    BlockId surface_block_at(int wx, int wz) {
+        return surface_block(wx, wz, surface_height(wx, wz));
+    }
     // Continuous (float) surface height — used by the analytic SDF so the
     // isosurface is smooth instead of snapping to integer block tops.
     float surface_height_f(float wx, float wz) {
@@ -683,7 +690,14 @@ private:
                 set_local(c, lx, h + i, lz, BLOCK_LOG);
             }
         }
-        
+        // Anchor to ground: the MC terrain surface sits at the FLOAT
+        // surface_height_f, up to ~1 block below integer h, so a trunk starting
+        // at h+1 floats. Sink 2x2 roots to h and h-1 so the base meets the ground.
+        for (int ry = h - 1; ry <= h; ry++) {
+            set_local(c, lx,   ry, lz,   BLOCK_LOG); set_local(c, lx+1, ry, lz,   BLOCK_LOG);
+            set_local(c, lx,   ry, lz+1, BLOCK_LOG); set_local(c, lx+1, ry, lz+1, BLOCK_LOG);
+        }
+
         int top = h + trunk_height;
         
         // === Add branches (horizontal LOG extensions) ===
@@ -752,7 +766,12 @@ private:
                 set_local(c, lx, h + i, lz, BLOCK_LOG);
             }
         }
-        
+        // Anchor pine to ground (see build_oak): roots at h and h-1.
+        for (int ry = h - 1; ry <= h; ry++) {
+            set_local(c, lx,   ry, lz,   BLOCK_LOG); set_local(c, lx+1, ry, lz,   BLOCK_LOG);
+            set_local(c, lx,   ry, lz+1, BLOCK_LOG); set_local(c, lx+1, ry, lz+1, BLOCK_LOG);
+        }
+
         // === Conical leaf layers ===
         int base = h + 2 + (int)(r2 * 2.0f);  // first ring height
         int topY = h + trunk_height;

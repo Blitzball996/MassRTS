@@ -36,7 +36,7 @@ public:
         
         // Load block textures (3DWorld assets)
         tex_grass_      = load_texture("assets/textures/blocks/grass.png");
-        tex_dirt_       = load_texture("assets/textures/blocks/dirt.jpg");
+        tex_dirt_       = load_texture("assets/textures/blocks/dirt.png");
         tex_rock_       = load_texture("assets/textures/blocks/rock.png");
         tex_rock2_      = load_texture("assets/textures/blocks/rock2.png");
         tex_sand_       = load_texture("assets/textures/blocks/desert_sand.jpg");

@@ -482,13 +482,13 @@ private:
     static void emit_tri(World& w, std::vector<float>& dst,
                          glm::vec3 p0, glm::vec3 p1, glm::vec3 p2,
                          glm::vec3 n0, glm::vec3 n1, glm::vec3 n2) {
-        // Reject degenerate / zero-area triangles. When an iso-crossing lands on
-        // a cube corner, two interpolated edge vertices coincide and the triangle
-        // collapses to a sliver — these render as the stray flickering polygons
-        // ("weird polygons") seen when digging. Skip them entirely.
+        // Drop degenerate / near-zero-area triangles (iso-crossing landing on a
+        // cube corner). The floating "billboard" quads in a dug hole are killed
+        // at the source instead — carve_sphere no longer lifts solid cells just
+        // outside the dig sphere to air, so those thin rim shelves never form.
         glm::vec3 fn = glm::cross(p1 - p0, p2 - p0);
         float area2 = glm::length(fn);          // = 2 * triangle area
-        if (area2 < 1e-6f) return;
+        if (area2 < 1e-4f) return;              // degenerate / near-zero-area
         // Repair any non-finite / zero interpolated normal with the face normal
         // so we never emit NaN-shaded geometry.
         fn /= area2;
@@ -497,20 +497,50 @@ private:
             return (std::isfinite(l) && l > 1e-4f) ? n / l : fn;
         };
         n0 = fix(n0); n1 = fix(n1); n2 = fix(n2);
-        push_vert(w, dst, p0, n0);
-        push_vert(w, dst, p1, n1);
-        push_vert(w, dst, p2, n2);
+
+        // === ONE material for the WHOLE triangle — the weird-polygon fix ===
+        // Sampling material PER VERTEX gave the three corners different material
+        // IDs (e.g. grass=1, dirt=2, ore=8). The GPU then interpolates v_mat
+        // ACROSS the face, sweeping through every material in between and painting
+        // garish multi-coloured "weird polygons" — most visible on freshly dug
+        // walls where grass/dirt/stone/ore meet. Fix: sample ONE material at the
+        // triangle centroid and give all three vertices that SAME mat+colour, so
+        // v_mat is constant across the face and nothing interpolates between
+        // unrelated palettes. (This is the version that was confirmed working;
+        // the later per-vertex "smooth layering" rewrite re-introduced the bug.)
+        glm::vec3 ctr = (p0 + p1 + p2) * (1.0f / 3.0f);
+        glm::vec3 cn  = n0 + n1 + n2;
+        float cnl = glm::length(cn);
+        cn = (cnl > 1e-4f) ? cn / cnl : fn;
+
+        float mat = 0.0f;
+        glm::vec3 col;
+        float surf = w.surface_height_f(ctr.x, ctr.z);
+        if (ctr.y > surf - 1.5f) {
+            // Natural top surface: the generator's biome block (grass/snow/sand)
+            // for this column via surface_block_at, kept uniform so the lawn shows
+            // no dirt veins.
+            BlockId sb = w.surface_block_at((int)std::floor(ctr.x), (int)std::floor(ctr.z));
+            const BlockDef& def = block_def(sb);
+            mat = (float)block_material(sb);
+            col = def.top_color;
+        } else {
+            // Dug floor / cave / steep cliff: the block just inside the surface
+            // along the (averaged) normal, so carved walls show real dirt/stone.
+            bool top = cn.y > 0.5f;
+            glm::vec3 inside = ctr - cn * 0.5f;
+            col = solid_color(w, (int)std::floor(inside.x), (int)std::floor(inside.y),
+                              (int)std::floor(inside.z), top, mat);
+        }
+
+        push_vert_uniform(dst, p0, n0, col, mat);
+        push_vert_uniform(dst, p1, n1, col, mat);
+        push_vert_uniform(dst, p2, n2, col, mat);
     }
 
-    static void push_vert(World& w, std::vector<float>& dst, glm::vec3 p, glm::vec3 n) {
-        bool top = n.y > 0.5f;
-        // sample the solid just beneath the surface point for albedo
-        glm::vec3 inside = p - n * 0.5f;
-        int sx = (int)std::floor(inside.x);
-        int sy = (int)std::floor(inside.y);
-        int sz = (int)std::floor(inside.z);
-        float mat = 0.0f;
-        glm::vec3 col = solid_color(w, sx, sy, sz, top, mat);
+    // Push one vertex with an explicit (triangle-uniform) colour + material.
+    static void push_vert_uniform(std::vector<float>& dst, glm::vec3 p, glm::vec3 n,
+                                  glm::vec3 col, float mat) {
         dst.push_back(p.x); dst.push_back(p.y); dst.push_back(p.z);
         dst.push_back(n.x); dst.push_back(n.y); dst.push_back(n.z);
         dst.push_back(col.r); dst.push_back(col.g); dst.push_back(col.b);

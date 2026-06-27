@@ -425,6 +425,23 @@ private:
                                  : (b == BLOCK_GRASS) ? BLOCK_DIRT : b;
                     inv.add(block_item(drop), 1, item_max_stack(block_item(drop)));
                 }
+                // Trees rooted in the just-removed terrain are now unsupported.
+                // The terrain carve path never ran tree physics, so digging under
+                // a tree left its logs/leaves hovering — the floating wood/leaf
+                // scrap mistaken for a "weird polygon" in dug holes. Scan every
+                // column in the carve footprint (+1 ring), flood up from the dig
+                // level and collapse any now-unsupported tree. Re-collapsing an
+                // already-dropped tree is a no-op, so duplicate columns are fine.
+                {
+                    std::vector<std::array<int,4>> tdrops;
+                    int R = (int)std::ceil(dig_radius_) + 1;
+                    int cxp = (int)std::floor(hp.x), cyp = (int)std::floor(hp.y), czp = (int)std::floor(hp.z);
+                    for (int dx = -R; dx <= R; dx++)
+                    for (int dz = -R; dz <= R; dz++)
+                        world.check_tree_collapse(cxp + dx, cyp, czp + dz, &tdrops);
+                    for (auto& d : tdrops)
+                        inv.add(block_item((BlockId)d[3]), 1, item_max_stack(block_item((BlockId)d[3])));
+                }
                 // Auto-smooth after deep digging to prevent marching cubes artifacts
                 if (hp.y < 30.0f && !flips.empty()) {
                     world.smooth_terrain(hp.x, hp.y, hp.z, dig_radius_ * 1.1f, 0.3f);

@@ -425,7 +425,12 @@ public:
         // the two integer endpoints and lerping — is the single change that makes
         // dug walls shade as a smooth rounded surface instead of faceted polygons.
         auto Ng = [&](glm::vec3 p) -> glm::vec3 {
-            const float e = 0.5f;
+            // Wider central-difference step (1.0 instead of 0.5) averages the SDF
+            // gradient over a larger neighbourhood, so the per-vertex normals are
+            // smoother. Marching cubes at 1-voxel resolution is inherently
+            // faceted; smoother normals let those facets shade as a rounded
+            // surface instead of reading as hard "折角" creases on dug ground.
+            const float e = 1.0f;
             float dx = Fs(p.x+e, p.y, p.z) - Fs(p.x-e, p.y, p.z);
             float dy = Fs(p.x, p.y+e, p.z) - Fs(p.x, p.y-e, p.z);
             float dz = Fs(p.x, p.y, p.z+e) - Fs(p.x, p.y, p.z-e);

@@ -314,7 +314,9 @@ public:
     // caller can award drops. Smooth-min blends a rounded bowl into the field.
     void carve_sphere(float cx, float cy, float cz, float radius, int op,
                       std::vector<std::array<int,4>>* flips = nullptr) {
-        float k = radius * 0.5f;             // smooth-blend width
+        float k = radius * 0.9f;             // smooth-blend width (wider = rounder,
+        // more eroded-looking holes; softer rims; overlapping digs merge without
+        // leaving the sharp "尖尖" spikes/creases between them).
         float reach = radius + k + 1.0f;
         int x0 = (int)std::floor(cx - reach), x1 = (int)std::ceil(cx + reach);
         int y0 = (int)std::floor(cy - reach), y1 = (int)std::ceil(cy + reach);

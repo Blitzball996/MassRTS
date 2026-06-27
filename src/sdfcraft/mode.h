@@ -442,10 +442,12 @@ private:
                     for (auto& d : tdrops)
                         inv.add(block_item((BlockId)d[3]), 1, item_max_stack(block_item((BlockId)d[3])));
                 }
-                // Auto-smooth after deep digging to prevent marching cubes artifacts
-                if (hp.y < 30.0f && !flips.empty()) {
-                    world.smooth_terrain(hp.x, hp.y, hp.z, dig_radius_ * 1.1f, 0.3f);
-                }
+                // NOTE: the old auto-smooth_terrain() call was REMOVED. It box-
+                // blurred the SDF field after every deep dig; repeated digging at
+                // one spot averaged the "air above / solid below" boundary into a
+                // near-flat plateau, which Marching Cubes then meshed as a big
+                // flat GREY SHEET hanging in the hole. The smin/smax carve already
+                // produces a smooth rounded bowl, so the extra blur only hurt.
                 break;
             }
             case SculptMode::RAISE: {

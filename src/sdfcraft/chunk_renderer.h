@@ -147,22 +147,21 @@ public:
         // opaque pass
         glUniform1f(glGetUniformLocation(chunk_prog_, "u_alpha"), 1.0f);
         glEnable(GL_DEPTH_TEST); glDisable(GL_BLEND);
-        // Draw the terrain double-sided. The Marching-Cubes corner layout is
-        // y-up while the edge/triangle tables are the standard z-up Bourke set,
-        // so a subset of the *complex* cube configurations (overhangs, caves,
-        // thin walls — exactly what carving a hole creates) come out with
-        // reversed winding and get backface-culled, leaving see-through
-        // "weird polygons" in dug-out areas. Vertex normals come from the SDF
-        // gradient (always outward), so disabling the cull renders both faces
-        // correctly with no shading penalty. Flat ground only hits the simple,
-        // correctly-wound cases, which is why it always looked fine with culling.
-        glDisable(GL_CULL_FACE);
+        // Backface culling is ON. The MC mesher now corrects every triangle's
+        // winding against its outward SDF-gradient normal (see emit_tri), so the
+        // complex carved configs (overhangs, caves, thin dug walls) are wound
+        // consistently outward. Culling the back faces removes the "folded paper"
+        // double surfaces that showed on deep digs when we drew terrain
+        // double-sided, without re-introducing see-through holes.
+        glEnable(GL_CULL_FACE); glCullFace(GL_BACK); glFrontFace(GL_CCW);
         for (auto& kv : gpu_) {
             if (kv.second.opaque_count == 0) continue;
             glBindVertexArray(kv.second.opaque_vao);
             glDrawArrays(GL_TRIANGLES, 0, kv.second.opaque_count);
         }
-        // transparent pass (water/glass/leaves), depth-write off
+        // transparent pass (water/glass/leaves) — draw double-sided so thin
+        // water/leaf surfaces are visible from inside too; depth-write off.
+        glDisable(GL_CULL_FACE);
         glUniform1f(glGetUniformLocation(chunk_prog_, "u_alpha"), 0.72f);
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glDepthMask(GL_FALSE);

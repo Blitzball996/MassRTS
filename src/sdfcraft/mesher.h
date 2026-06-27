@@ -63,7 +63,12 @@ public:
                 glm::vec3 col = (dirs[d][1] > 0) ? def.top_color : def.color;
                 // simple directional shade so cubes read as 3D
                 float shade = face_shade(d);
-                emit_face(dst, glm::vec3((float)wx, (float)wy, (float)wz), d, col * shade, block_material(b));
+                // Cube-meshed blocks are all "special" object materials (wood,
+                // leaves, water, glass, placed blocks). Encode v_mat as 200+code
+                // so the chunk shader takes its discrete-material path — values
+                // below 100 are reserved for the MC terrain's earthy DEPTH value.
+                emit_face(dst, glm::vec3((float)wx, (float)wy, (float)wz), d,
+                          col * shade, 200.0f + block_material(b));
             }
         }
     }

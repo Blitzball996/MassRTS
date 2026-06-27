@@ -63,49 +63,38 @@ float noise(vec2 p) {
     return mix(mix(hash(i),hash(i+vec2(1,0)),f.x), mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);
 }
 
-// === Single-material terrain albedo, driven by the BLOCK material ===
-// `matf` is the integer material of one earthy block type. We pick the matching
-// triplanar texture so digging through grass -> dirt -> stone actually changes
-// the surface. Slope only exposes a little rock/dirt on genuinely steep cliff
-// faces; it never decides the base layer — that was the "everything is grass" bug.
-vec3 terrain_albedo(int matf, vec3 pos, vec3 n, float slope, vec3 w) {
-    float tex_scale = 0.25; // world units per texture repeat
-    if (matf == MAT_GRASS) {
-        vec3 grass = triplanar_detail(u_tex_grass, pos, w, tex_scale);
-        vec3 dirt  = triplanar_detail(u_tex_dirt,  pos, w, tex_scale);
-        // Only a genuinely steep cliff lip shows exposed dirt. The threshold is
-        // pushed high (0.78) because the per-fragment interpolated normal wobbles
-        // a little across each triangle on bumpy lawn; a lower threshold let that
-        // wobble cross into "dirt" mid-triangle, drawing a faint reddish dirt web
-        // along every mesh edge. At 0.78 only real cliff faces expose dirt.
-        return mix(grass, dirt, smoothstep(0.78, 0.95, slope));
-    }
-    if (matf == MAT_DIRT) {
-        return triplanar_detail(u_tex_dirt, pos, w, tex_scale);
-    }
-    // MAT_ROCK (and any other earthy id): stone with a mossy blend for variety,
-    // and a darker second rock texture deeper underground.
-    vec3 rock  = triplanar_detail(u_tex_rock,       pos, w, tex_scale * 0.8);
-    vec3 mossy = triplanar_detail(u_tex_mossy_rock, pos, w, tex_scale * 0.6);
-    rock = mix(rock, mossy, noise(pos.xz * 0.04) * 0.4);
-    vec3 deep_rock = triplanar_detail(u_tex_rock2, pos, w, tex_scale * 0.5);
-    float depth = smoothstep(0.0, 24.0, max(0.0, 56.0 - pos.y));
-    return mix(rock, deep_rock, depth * 0.6);
-}
+// === Earthy terrain: grass -> dirt -> rock blended by DEPTH below surface ===
+// `depth` is the per-vertex distance below the natural ground (0 at the lawn,
+// growing as you dig). It is a smooth geometric value the GPU interpolates
+// cleanly, so the grass/dirt/rock transitions are gradient-soft with no garish
+// cross-material banding and no triangle-edge sawtooth. A little world-space
+// noise jitters the thresholds so the boundaries read as organic, not as razor
+// contour lines. Slope additionally exposes dirt/rock on steep cliff faces.
+vec3 earthy_color(float depth, vec3 pos, vec3 n, float slope, vec3 w) {
+    float ts = 0.25;
+    vec3 grass = triplanar_detail(u_tex_grass, pos, w, ts);
+    vec3 dirt  = triplanar_detail(u_tex_dirt,  pos, w, ts);
+    vec3 rock  = triplanar_detail(u_tex_rock,  pos, w, ts * 0.8);
+    vec3 mossy = triplanar_detail(u_tex_mossy_rock, pos, w, ts * 0.6);
+    rock = mix(rock, mossy, noise(pos.xz * 0.04) * 0.35);
+    vec3 deep  = triplanar_detail(u_tex_rock2, pos, w, ts * 0.5);
 
-// Blend across the fractional material the GPU interpolates between two adjacent
-// earthy vertices (e.g. grass=1 -> dirt=2 gives 1.5). Sampling both endpoints and
-// mixing by fract() dissolves the hard grass/dirt/stone seam into a smooth
-// gradient instead of a hard cut.
-vec3 get_terrain_color(vec3 pos, vec3 n, float slope, vec3 w) {
-    // Snap to the NEAREST material — no fract(v_mat) blend. The blend dissolved
-    // grass/dirt/stone layer seams smoothly on big surfaces, but on the tiny
-    // isolated shelves a dig leaves between carve spheres it smeared a
-    // grass→dirt→rock gradient across a handful of pixels, and the bright rock
-    // band framed the scrap like a glowing bordered card — the "weird polygon"
-    // floating in a hole. The lawn is already one uniform material per column via
-    // surface_block_at, so snapping does NOT bring back the dirt-vein maze.
-    return terrain_albedo(int(floor(v_mat + 0.5)), pos, n, slope, w);
+    // organic jitter so the grass/dirt line isn't a clean geometric contour
+    float j  = (noise(pos.xz * 0.5) - 0.5) * 0.7;
+    float j2 = (noise(pos.xz * 0.25 + 13.0) - 0.5) * 1.5;
+
+    // depth-driven layer fractions (smooth)
+    float toDirt = smoothstep(0.35 + j, 1.7 + j, depth);
+    float toRock = smoothstep(3.0 + j2, 7.5 + j2, depth);
+    // steep faces expose earth even at the surface (cliffs / pit walls)
+    toDirt = max(toDirt, smoothstep(0.55, 0.80, slope));
+    toRock = max(toRock, smoothstep(0.80, 0.96, slope));
+
+    vec3 col = mix(grass, dirt, toDirt);
+    col = mix(col, rock, toRock);
+    // deepest strata shift to the darker rock2 texture
+    col = mix(col, deep, smoothstep(10.0, 26.0, depth) * 0.6);
+    return col;
 }
 
 // === Per-material colour (non-terrain materials) ===
@@ -156,14 +145,17 @@ void main() {
     vec3 light_n = n;
 
     // === Material colour ===
-    int mat = int(floor(v_mat + 0.5));
+    // v_mat packs two things (set by the mesher): values < 100 are an EARTHY
+    // DEPTH (grass/dirt/rock blended smoothly by how far below the surface we
+    // are); values >= 200 are a snapped special material code (200 + MAT_*).
+    int mat;
     vec3 base;
-    if (mat == MAT_GRASS || mat == MAT_DIRT || mat == MAT_ROCK) {
-        // Earthy terrain: texture chosen by the block's real material (v_mat),
-        // with fract(v_mat) blending across grass/dirt/stone layer boundaries.
-        base = get_terrain_color(pos, n, slope, w);
-    } else {
+    if (v_mat >= 100.0) {
+        mat = int(floor(v_mat - 200.0 + 0.5));   // special: ore/wood/leaves/water/sand/snow/gravel
         base = get_material_color(mat, pos, n, w);
+    } else {
+        mat = MAT_DIRT;                          // earthy sentinel (no specular)
+        base = earthy_color(v_mat, pos, n, slope, w);   // v_mat == depth below surface
     }
 
     // === PBR-like lighting ===

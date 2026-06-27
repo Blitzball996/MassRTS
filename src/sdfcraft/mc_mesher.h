@@ -498,47 +498,83 @@ private:
         };
         n0 = fix(n0); n1 = fix(n1); n2 = fix(n2);
 
-        // === ONE material for the WHOLE triangle — the weird-polygon fix ===
-        // Sampling material PER VERTEX gave the three corners different material
-        // IDs (e.g. grass=1, dirt=2, ore=8). The GPU then interpolates v_mat
-        // ACROSS the face, sweeping through every material in between and painting
-        // garish multi-coloured "weird polygons" — most visible on freshly dug
-        // walls where grass/dirt/stone/ore meet. Fix: sample ONE material at the
-        // triangle centroid and give all three vertices that SAME mat+colour, so
-        // v_mat is constant across the face and nothing interpolates between
-        // unrelated palettes. (This is the version that was confirmed working;
-        // the later per-vertex "smooth layering" rewrite re-introduced the bug.)
-        glm::vec3 ctr = (p0 + p1 + p2) * (1.0f / 3.0f);
-        glm::vec3 cn  = n0 + n1 + n2;
-        float cnl = glm::length(cn);
-        cn = (cnl > 1e-4f) ? cn / cnl : fn;
-
-        float mat = 0.0f;
-        glm::vec3 col;
-        float surf = w.surface_height_f(ctr.x, ctr.z);
-        if (ctr.y > surf - 1.5f) {
-            // Natural top surface: the generator's biome block (grass/snow/sand)
-            // for this column via surface_block_at, kept uniform so the lawn shows
-            // no dirt veins.
-            BlockId sb = w.surface_block_at((int)std::floor(ctr.x), (int)std::floor(ctr.z));
-            const BlockDef& def = block_def(sb);
-            mat = (float)block_material(sb);
-            col = def.top_color;
-        } else {
-            // Dug floor / cave / steep cliff: the block just inside the surface
-            // along the (averaged) normal, so carved walls show real dirt/stone.
-            bool top = cn.y > 0.5f;
-            glm::vec3 inside = ctr - cn * 0.5f;
-            col = solid_color(w, (int)std::floor(inside.x), (int)std::floor(inside.y),
-                              (int)std::floor(inside.z), top, mat);
+        // Winding correction. The MC triangle/edge tables emit inconsistent
+        // winding for the complex cube configs (overhangs, caves, thin dug
+        // walls), which forced us to render terrain with GL_CULL_FACE OFF — so
+        // BOTH sides of every thin wall drew, and a deep dig looked like folded
+        // paper / book pages. The SDF-gradient vertex normals are reliably
+        // OUTWARD, so if the face normal points the other way the triangle is
+        // wound backwards: swap two corners to flip it. With every triangle wound
+        // outward, backface culling can be turned back on and the folds vanish.
+        glm::vec3 avgN = n0 + n1 + n2;
+        float al = glm::length(avgN);
+        avgN = (al > 1e-4f) ? avgN / al : fn;
+        if (glm::dot(fn, avgN) < 0.0f) {
+            glm::vec3 tp = p1; p1 = p2; p2 = tp;
+            glm::vec3 tn = n1; n1 = n2; n2 = tn;
+            fn = -fn;
         }
 
-        push_vert_uniform(dst, p0, n0, col, mat);
-        push_vert_uniform(dst, p1, n1, col, mat);
-        push_vert_uniform(dst, p2, n2, col, mat);
+        // === Material: smooth DEPTH for earthy terrain, snapped CODE for the
+        //     special block materials ===========================================
+        // The "weird polygons" came from interpolating a MATERIAL CODE across a
+        // triangle (grass=1 .. ore=8 sweeps through every palette). But grass /
+        // dirt / rock are really just one continuous earthy surface ordered by
+        // DEPTH below the natural ground — and depth is a smooth geometric value
+        // that is perfectly safe to interpolate per-vertex. So:
+        //   * all-earthy triangle  -> per-vertex v_mat = depth-below-surface.
+        //     The shader blends grass->dirt->rock by that depth, giving a SMOOTH
+        //     (no sawtooth, no garish) transition.
+        //   * any special block (ore/wood/leaves/water/sand/snow/gravel) on the
+        //     triangle -> snap the WHOLE triangle to 200+code so it never
+        //     interpolates into the earthy range or between two palettes.
+        int   m0, m1, m2;  float d0, d1, d2;  glm::vec3 c0, c1, c2;
+        classify_vertex(w, p0, n0, m0, d0, c0);
+        classify_vertex(w, p1, n1, m1, d1, c1);
+        classify_vertex(w, p2, n2, m2, d2, c2);
+        auto earthy = [](int m){ return m == MAT_GRASS || m == MAT_DIRT || m == MAT_ROCK; };
+        if (earthy(m0) && earthy(m1) && earthy(m2)) {
+            push_vert_uniform(dst, p0, n0, c0, d0);
+            push_vert_uniform(dst, p1, n1, c1, d1);
+            push_vert_uniform(dst, p2, n2, c2, d2);
+        } else {
+            glm::vec3 ctr = (p0 + p1 + p2) * (1.0f / 3.0f);
+            glm::vec3 cn  = n0 + n1 + n2;
+            float cnl = glm::length(cn);
+            cn = (cnl > 1e-4f) ? cn / cnl : fn;
+            int mc; float dd; glm::vec3 cc;
+            classify_vertex(w, ctr, cn, mc, dd, cc);
+            float code = 200.0f + (float)mc;     // >=200 => special, snapped
+            push_vert_uniform(dst, p0, n0, cc, code);
+            push_vert_uniform(dst, p1, n1, cc, code);
+            push_vert_uniform(dst, p2, n2, cc, code);
+        }
     }
 
-    // Push one vertex with an explicit (triangle-uniform) colour + material.
+    // Classify one surface point: its block material code, its depth below the
+    // natural surface (>=0), and an albedo. Natural top uses the generator's
+    // biome block; dug/steep points sample the block just inside the surface.
+    static void classify_vertex(World& w, glm::vec3 p, glm::vec3 n,
+                                int& mat, float& depth, glm::vec3& col) {
+        float surf = w.surface_height_f(p.x, p.z);
+        depth = surf - p.y;
+        if (depth < 0.0f) depth = 0.0f;
+        if (depth > 60.0f) depth = 60.0f;        // keep clear of the 200 sentinel
+        float mf = 0.0f;
+        if (p.y > surf - 1.5f) {
+            BlockId sb = w.surface_block_at((int)std::floor(p.x), (int)std::floor(p.z));
+            col = block_def(sb).top_color;
+            mf  = block_material(sb);
+        } else {
+            bool top = n.y > 0.5f;
+            glm::vec3 inside = p - n * 0.5f;
+            col = solid_color(w, (int)std::floor(inside.x), (int)std::floor(inside.y),
+                              (int)std::floor(inside.z), top, mf);
+        }
+        mat = (int)(mf + 0.5f);
+    }
+
+    // Push one vertex with an explicit colour + packed material/depth value.
     static void push_vert_uniform(std::vector<float>& dst, glm::vec3 p, glm::vec3 n,
                                   glm::vec3 col, float mat) {
         dst.push_back(p.x); dst.push_back(p.y); dst.push_back(p.z);

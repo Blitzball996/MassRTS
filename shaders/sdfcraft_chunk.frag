@@ -132,7 +132,12 @@ vec3 get_material_color(int mat, vec3 pos, vec3 n, vec3 w) {
     if (mat == MAT_WATER) {
         return vec3(0.08, 0.25, 0.45);
     }
-    return v_color; // MAT_GENERIC fallback
+    // Safety fallback for any unhandled / earthy code that reached the special
+    // path (e.g. an old 200+ROCK snap): use a real rock texture, NOT flat
+    // v_color, so it can never render as a grey untextured "sheet".
+    if (mat == MAT_GENERIC || mat == MAT_GRASS || mat == MAT_DIRT || mat == MAT_ROCK)
+        return triplanar_detail(u_tex_rock, pos, w, tex_scale * 0.8);
+    return v_color;
 }
 
 void main() {

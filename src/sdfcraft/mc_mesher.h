@@ -537,19 +537,28 @@ private:
         classify_vertex(w, p0, n0, m0, d0, c0);
         classify_vertex(w, p1, n1, m1, d1, c1);
         classify_vertex(w, p2, n2, m2, d2, c2);
+        // Decide earthy-vs-special by the CENTROID's material, NOT "all 3 corners
+        // earthy". A rock wall triangle that merely TOUCHES an ore voxel at one
+        // corner used to fall into the special branch and get snapped to
+        // 200+centroid(=ROCK); the shader's special path doesn't texture ROCK, so
+        // it returned a flat untextured v_color — the grey "sheet" in dug caves.
+        // Keying off the centroid: a rock-centred triangle stays earthy (depth ->
+        // proper rock texture) even with an ore corner; only triangles actually
+        // centred in a special block snap to that material.
+        glm::vec3 ctr = (p0 + p1 + p2) * (1.0f / 3.0f);
+        glm::vec3 cn  = n0 + n1 + n2;
+        float cnl = glm::length(cn);
+        cn = (cnl > 1e-4f) ? cn / cnl : fn;
+        int mc; float dc; glm::vec3 cc;
+        classify_vertex(w, ctr, cn, mc, dc, cc);
         auto earthy = [](int m){ return m == MAT_GRASS || m == MAT_DIRT || m == MAT_ROCK; };
-        if (earthy(m0) && earthy(m1) && earthy(m2)) {
+        if (earthy(mc)) {
+            // per-vertex DEPTH -> smooth grass/dirt/rock, no garish, no grey sheet
             push_vert_uniform(dst, p0, n0, c0, d0);
             push_vert_uniform(dst, p1, n1, c1, d1);
             push_vert_uniform(dst, p2, n2, c2, d2);
         } else {
-            glm::vec3 ctr = (p0 + p1 + p2) * (1.0f / 3.0f);
-            glm::vec3 cn  = n0 + n1 + n2;
-            float cnl = glm::length(cn);
-            cn = (cnl > 1e-4f) ? cn / cnl : fn;
-            int mc; float dd; glm::vec3 cc;
-            classify_vertex(w, ctr, cn, mc, dd, cc);
-            float code = 200.0f + (float)mc;     // >=200 => special, snapped
+            float code = 200.0f + (float)mc;     // genuine special block, snapped
             push_vert_uniform(dst, p0, n0, cc, code);
             push_vert_uniform(dst, p1, n1, cc, code);
             push_vert_uniform(dst, p2, n2, cc, code);

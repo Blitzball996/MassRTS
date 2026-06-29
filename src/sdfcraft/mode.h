@@ -19,7 +19,8 @@
 #include "crafting.h"
 #include "chunk_renderer.h"
 #include "hud_renderer.h"
-#include "inventory_screen.h"
+#include "inventory_screen_mc.h"
+#include "craft_screen_mc.h"
 #include "mc_model.h"
 #include "sky_renderer.h"
 #include "world_ops.h"
@@ -67,8 +68,8 @@ struct FrameInput {
     int   hotbar_scroll = 0; // wheel
     // Inventory screen (E to toggle). While open, look/move are frozen and the
     // cursor is free; clicks drive the GUI instead of dig/place.
-    bool  inv_toggle = false;     // edge: open/close inventory
-    // craft_toggle removed: workbench 3×3 via right-click block (future)
+    bool  inv_toggle = false;     // edge: open/close inventory (E key)
+    bool  craft_toggle = false;   // edge: open/close crafting recipe list (R key, Console Edition)
     bool  mouse_click = false;    // edge: left click (GUI pick/place)
     bool  mouse_right = false;    // edge: right click (GUI half/one)
     float mouse_x = 0, mouse_y = 0;  // cursor pixel pos (GUI mode)
@@ -160,9 +161,10 @@ public:
         if (!renderer_.init(shader_dir)) return false;
         hud_ready_  = hud_.init();
         inv_scr_ready_ = inv_screen_.init();
+        craft_scr_ready_ = craft_screen_.init();
         mob_ready_  = mobs_rend_.init();
         sky_ready_  = sky_.init(shader_dir);
-        planet_ready_ = planet_ready_ = planet_rend_.init();
+        planet_ready_ = planet_rend_.init();
         planet_.height = [](const dvec3& dir)->double {
             double n = std::sin(dir.x*8.0)*std::cos(dir.y*6.0)*std::sin(dir.z*7.0);
             n += 0.5*std::sin(dir.x*23.0+1.0)*std::sin(dir.z*19.0);
@@ -181,15 +183,16 @@ public:
         return nullptr;
     }
 
-    // True while any full-screen GUI (inventory) is open — the entry
+    // True while any full-screen GUI (inventory or crafting) is open — the entry
     // point frees the cursor and stops mouse-look so the player can click.
-    bool invOpen() const { return inv_open_; }
+    bool invOpen() const { return inv_open_ || craft_open_; }
 
     void shutdown() {
         renderer_.shutdown();
         if (mob_ready_) mobs_rend_.shutdown();
         if (sky_ready_) sky_.shutdown();
         if (inv_scr_ready_) inv_screen_.destroy();
+        if (craft_scr_ready_) craft_screen_.destroy();
     }
 
     void update(const FrameInput& in, float dt, int view_radius = 24) {
@@ -199,16 +202,30 @@ public:
         // --- network receive (client mirrors authoritative state) ---
         if (role_ == Role::Client) client_receive();
 
-        // --- inventory screen: toggle + while-open input capture ---
+        // --- inventory & crafting screens: toggle + while-open input capture ---
         if (in.inv_toggle) {
             inv_open_ = !inv_open_;
-            if (!inv_open_ && inv_scr_ready_) inv_screen_.returnAll(inv);  // don't lose dragged items
+            if (inv_open_) craft_open_ = false;   // only one GUI at a time
+            if (!inv_open_ && inv_scr_ready_) inv_screen_.returnAll(inv);
+        }
+        if (in.craft_toggle) {
+            craft_open_ = !craft_open_;
+            if (craft_open_) { if (inv_scr_ready_) inv_screen_.returnAll(inv); inv_open_ = false; }
         }
         if (inv_open_) {
-            // GUI owns the mouse: route clicks to slots, freeze look/world/physics.
+            // E key: Inventory GUI (background + 2×2 crafting)
             last_cursor_x_ = in.mouse_x; last_cursor_y_ = in.mouse_y;
             if (inv_scr_ready_ && (in.mouse_click || in.mouse_right))
                 inv_screen_.click(inv, recipes, last_fbw_, last_fbh_, in.mouse_x, in.mouse_y, in.mouse_right);
+            advance_sim(in, dt);
+            return;
+        }
+        if (craft_open_) {
+            // R key: Crafting recipe list (Console Edition)
+            last_cursor_x_ = in.mouse_x; last_cursor_y_ = in.mouse_y;
+            if (craft_scr_ready_ && in.hotbar_scroll) craft_screen_.scroll(in.hotbar_scroll);
+            if (craft_scr_ready_ && in.mouse_click)
+                craft_screen_.click(inv, recipes, last_fbw_, last_fbh_, in.mouse_x, in.mouse_y);
             advance_sim(in, dt);
             return;
         }
@@ -392,9 +409,11 @@ public:
 
         // remember fb size for GUI hit-testing this frame
         last_fbw_ = fb_w; last_fbh_ = fb_h;
-        // inventory screen draws on top of the HUD when open
+        // inventory/crafting screens draw on top of the HUD when open
         if (inv_open_ && inv_scr_ready_)
             inv_screen_.draw(inv, recipes, fb_w, fb_h, last_cursor_x_, last_cursor_y_);
+        if (craft_open_ && craft_scr_ready_)
+            craft_screen_.draw(inv, recipes, fb_w, fb_h, last_cursor_x_, last_cursor_y_);
     }
 
     const RayHit& target() const { return last_hit_; }
@@ -439,10 +458,13 @@ private:
     ChunkRenderer  renderer_;
     HudRenderer    hud_;
     bool           hud_ready_ = false;
-    InventoryScreen inv_screen_;
+    InventoryScreenMC inv_screen_;
     bool           inv_scr_ready_ = false;
     bool           inv_open_ = false;
-    int            last_fbw_ = 1600, last_fbh_ = 900;   // last framebuffer size (for GUI hit-test)
+    CraftScreenMC  craft_screen_;
+    bool           craft_scr_ready_ = false;
+    bool           craft_open_ = false;
+    int            last_fbw_ = 1600, last_fbh_ = 900;
     float          last_cursor_x_ = 0, last_cursor_y_ = 0;
     McModelRenderer mobs_rend_;
     bool           mob_ready_ = false;

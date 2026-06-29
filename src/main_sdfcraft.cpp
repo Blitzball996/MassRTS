@@ -83,10 +83,11 @@ static bool   g_place_edge = false;
 static bool   g_attack_edge = false;   // LMB edge: melee swing at a mob
 static bool   g_eat_edge = false;      // Q: eat held food (moved off E)
 static bool   g_inv_edge = false;      // E: toggle inventory screen
+static bool   g_craft_edge = false;    // R: toggle crafting recipe list (Console Edition)
 static bool   g_lclick_edge = false;   // raw left-click edge (GUI when inv open)
 static bool   g_rclick_edge = false;   // raw right-click edge (GUI when inv open)
 static bool   g_fly_edge = false;
-static bool   g_takeoff_edge = false;   // V: enter fly mode (R removed)
+static bool   g_takeoff_edge = false;   // V: enter fly mode
 static bool   g_land_edge = false;      // C: enter walk mode
 static bool   g_planet_edge = false;
 static const float MOUSE_SENS = 0.12f;
@@ -111,8 +112,8 @@ static void key_cb(GLFWwindow* w, int key, int, int action, int) {
     if (key == GLFW_KEY_C && action == GLFW_PRESS) g_land_edge = true;
     if (key == GLFW_KEY_G && action == GLFW_PRESS) g_planet_edge = true;
     if (key == GLFW_KEY_Q && action == GLFW_PRESS) g_eat_edge = true;   // eat (moved off E)
-    if (key == GLFW_KEY_E && action == GLFW_PRESS) g_inv_edge = true;   // open/close inventory
-    // R key removed: crafting now via workbench (right-click block)
+    if (key == GLFW_KEY_E && action == GLFW_PRESS) g_inv_edge = true;   // inventory (E key)
+    if (key == GLFW_KEY_R && action == GLFW_PRESS) g_craft_edge = true; // crafting list (R key, Console Edition)
 }
 
 int main(int argc, char** argv) {
@@ -121,7 +122,7 @@ int main(int argc, char** argv) {
     std::string shot_path; int shot_frames = 120;
     bool want_fly = false, want_planet = false, want_dig = false;
     int  qa_mob = -1;   // QA closeup: MobKind index to spawn directly in front
-    bool qa_mob_side = false, qa_mob_walk = false, qa_openinv = false;
+    bool qa_mob_side = false, qa_mob_walk = false, qa_openinv = false, qa_opencraft = false;
     float px=0, py=1e9f, pz=0, yaw=0, pitch=-20;
     // --- multiplayer flags ---
     enum class Net { Solo, Host, Client, Server } net_mode = Net::Solo;
@@ -138,7 +139,7 @@ int main(int argc, char** argv) {
         else if (a == "--mobside") qa_mob_side = true;   // QA: show mob's side profile
         else if (a == "--mobwalk") qa_mob_walk = true;   // QA: animate walk
         else if (a == "--openinv") qa_openinv = true;     // QA: open inventory screen
-        // --opencraft removed: use inventory's 2×2 grid instead
+        else if (a == "--opencraft") qa_opencraft = true; // QA: open crafting recipe list
         else if (a == "--pos" && i+3 < argc) { px=atof(argv[++i]); py=atof(argv[++i]); pz=atof(argv[++i]); }
         else if (a == "--look" && i+2 < argc) { yaw=atof(argv[++i]); pitch=atof(argv[++i]); }
         else if (a == "--host")  net_mode = Net::Host;
@@ -212,7 +213,7 @@ int main(int argc, char** argv) {
         in.crouch = !gui && glfwGetKey(win, GLFW_KEY_LEFT_SHIFT)==GLFW_PRESS;
         in.dig    = !gui && glfwGetMouseButton(win, GLFW_MOUSE_BUTTON_LEFT)==GLFW_PRESS;
         in.inv_toggle = g_inv_edge;     g_inv_edge = false;
-        // craft_toggle removed: workbench opens 3×3 via right-click block
+        in.craft_toggle = g_craft_edge; g_craft_edge = false;
         // mouse clicks: while GUI is open they drive the inventory; otherwise they
         // dig/place/attack the world.
         if (gui) {
@@ -263,6 +264,10 @@ int main(int argc, char** argv) {
             // QA: open the inventory screen on frame 1, park a cursor over a slot
             if (qa_openinv) {
                 if (frame == 0) in.inv_toggle = true;
+                in.mouse_x = 820.0f; in.mouse_y = 470.0f;
+            }
+            if (qa_opencraft) {
+                if (frame == 0) in.craft_toggle = true;
                 in.mouse_x = 820.0f; in.mouse_y = 470.0f;
             }
             dt = 1.0f / 60.0f;

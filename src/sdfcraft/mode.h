@@ -389,7 +389,7 @@ public:
         // transition to the deep-blue upper atmosphere reads smoothly.
         float t_alt = glm::clamp(climb / 4000.0f, 0.0f, 1.0f);
         glm::vec3 fog_color = glm::mix(sky, glm::vec3(0.02f, 0.03f, 0.08f), t_alt);
-        renderer_.render(world, view, proj, eye, sun, fog_color, fog_start, fog_end);
+        renderer_.render(world, view, proj, eye, sun, fog_color, fog_start, fog_end, time_);
 
         // --- mobs + other players (MC textured models) ---
         if (mob_ready_) {

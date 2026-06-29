@@ -11,6 +11,7 @@ uniform float u_alpha;
 uniform vec3  u_fog_color;
 uniform float u_fog_start;
 uniform float u_fog_end;
+uniform float u_time;     // seconds, drives water animation
 
 // Texture samplers (loaded by chunk_renderer)
 uniform sampler2D u_tex_grass;
@@ -61,6 +62,28 @@ float hash(vec2 p) {
 float noise(vec2 p) {
     vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
     return mix(mix(hash(i),hash(i+vec2(1,0)),f.x), mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);
+}
+
+// === Procedural normal detail (micro-relief without normal maps) =============
+// Sample the noise field around the world position and take its gradient to
+// perturb the shading normal. This makes rock/dirt/sand catch the sun with
+// fine bumpy relief instead of reading as smooth plastic, which is most of the
+// "flat / not 3A" feeling. Strength is per-material (rock rough, snow smooth).
+// Triplanar-projected so it works on any face orientation.
+vec3 perturb_normal(vec3 n, vec3 pos, float strength, float scale) {
+    vec3 aw = pow(abs(n), vec3(4.0)); aw /= max(aw.x+aw.y+aw.z, 1e-5);
+    // height = sum of two noise octaves projected on the dominant axis plane
+    vec2 uvx = pos.yz*scale, uvy = pos.xz*scale, uvz = pos.xy*scale;
+    float e = 0.75;
+    // central-difference the noise on each plane, blend by triplanar weights
+    vec2 dX = vec2(noise(uvx+vec2(e,0))-noise(uvx-vec2(e,0)), noise(uvx+vec2(0,e))-noise(uvx-vec2(0,e)));
+    vec2 dY = vec2(noise(uvy+vec2(e,0))-noise(uvy-vec2(e,0)), noise(uvy+vec2(0,e))-noise(uvy-vec2(0,e)));
+    vec2 dZ = vec2(noise(uvz+vec2(e,0))-noise(uvz-vec2(e,0)), noise(uvz+vec2(0,e))-noise(uvz-vec2(0,e)));
+    // assemble a world-space bump gradient and tilt the normal away from it
+    vec3 grad = vec3(dY.x*aw.y + dZ.x*aw.z,
+                     dX.x*aw.x + dZ.y*aw.z,
+                     dX.y*aw.x + dY.y*aw.y);
+    return normalize(n - grad * strength);
 }
 
 // === Earthy terrain: grass -> dirt -> rock blended by DEPTH below surface ===
@@ -118,11 +141,18 @@ vec3 get_material_color(int mat, vec3 pos, vec3 n, vec3 w) {
         return mix(wood, bark, bark_blend);
     }
     if (mat == MAT_LEAVES) {
-        // Rich green canopy
-        vec3 leaf = vec3(0.12, 0.34, 0.08);
-        vec3 leaf_b = vec3(0.20, 0.50, 0.14);
-        float vary = noise(pos.xz * 0.5 + pos.y * 0.3);
-        return mix(leaf, leaf_b, vary);
+        // Dappled canopy: several green tones broken up by multi-scale noise so
+        // it reads as foliage clumps + sky gaps, not a flat green blob. A bright
+        // sun-side tint and dark interior give it depth.
+        vec3 leaf_dark = vec3(0.06, 0.20, 0.04);
+        vec3 leaf_mid  = vec3(0.13, 0.36, 0.09);
+        vec3 leaf_lit  = vec3(0.34, 0.62, 0.20);
+        float n1 = noise(pos.xz * 0.9 + pos.y * 0.6);
+        float n2 = noise(pos.xz * 2.7 - pos.y * 1.3);
+        float clump = n1 * 0.65 + n2 * 0.35;
+        vec3 c = mix(leaf_dark, leaf_mid, smoothstep(0.25, 0.6, clump));
+        c = mix(c, leaf_lit, smoothstep(0.65, 0.95, clump));
+        return c;
     }
     if (mat == MAT_ORE) {
         vec3 rock = triplanar_detail(u_tex_rock, pos, w, tex_scale);
@@ -130,7 +160,15 @@ vec3 get_material_color(int mat, vec3 pos, vec3 n, vec3 w) {
         return mix(rock, v_color * 1.5, smoothstep(0.6, 0.85, sparkle));
     }
     if (mat == MAT_WATER) {
-        return vec3(0.08, 0.25, 0.45);
+        // Layered ripple tint: two scrolling noise fields modulate between a deep
+        // and a shallow blue so the surface has moving structure instead of a
+        // dead flat fill. (Real animation/fresnel applied in main() with the
+        // perturbed normal + specular.)
+        float r1 = noise(pos.xz * 0.18 + u_time * 0.05);
+        float r2 = noise(pos.xz * 0.07 - u_time * 0.03);
+        vec3 deep    = vec3(0.04, 0.16, 0.34);
+        vec3 shallow = vec3(0.10, 0.34, 0.52);
+        return mix(deep, shallow, clamp(r1 * 0.6 + r2 * 0.4, 0.0, 1.0));
     }
     // Safety fallback for any unhandled / earthy code that reached the special
     // path (e.g. an old 200+ROCK snap): use a real rock texture, NOT flat
@@ -164,6 +202,18 @@ void main() {
     }
 
     // === PBR-like lighting ===
+    // Per-material micro-relief: tilt the shading normal by a procedural bump so
+    // surfaces catch the sun with fine detail (the biggest "flat/plastic" fix).
+    // Water gets an animated ripple normal; smooth materials (snow) stay smooth.
+    if (mat == MAT_WATER) {
+        vec3 wn = perturb_normal(light_n, vec3(pos.x, pos.y, pos.z) + vec3(u_time*0.6,0,u_time*0.4), 0.6, 0.35);
+        light_n = normalize(mix(light_n, wn, 0.8));
+    } else if (mat != MAT_SNOW && mat != MAT_LEAVES) {
+        float bump = (mat == MAT_ROCK || mat == MAT_GENERIC) ? 0.55
+                   : (mat == MAT_SAND) ? 0.25 : 0.40;   // rock roughest, sand subtle
+        light_n = perturb_normal(light_n, pos, bump, 0.9);
+    }
+
     vec3 to_sun = normalize(u_sun_dir);
     vec3 to_cam = normalize(u_cam - pos);
     vec3 half_vec = normalize(to_sun + to_cam);
@@ -186,8 +236,11 @@ void main() {
     float spec_power = 64.0;
     float spec_strength = 0.0;
     if (mat == MAT_WATER) {
-        spec_strength = 0.6;
-        spec_power = 64.0;
+        // Fresnel: water gets much brighter + reflective at grazing angles, like
+        // a real lake catching the sky/sun near the horizon.
+        float fres = pow(1.0 - max(dot(to_cam, light_n), 0.0), 5.0);
+        spec_strength = 0.5 + fres * 1.8;
+        spec_power = 120.0;
     }
     float spec = pow(NdotH, spec_power) * spec_strength * step(0.0, NdotL);
 
@@ -214,8 +267,16 @@ void main() {
     vec3 fog_sky = mix(u_fog_color, vec3(0.65, 0.78, 0.95), 0.3); // slightly bluer
     color = mix(color, fog_sky, fog);
 
-    // Slight exposure / tone mapping for HDR-like feel
-    color = color / (color + vec3(1.0)) * 1.15; // Reinhard tonemap + exposure boost
+    // Slight exposure / tone mapping for HDR-like feel.
+    // ACES filmic approximation (Narkowicz) — gives a cinematic roll-off in the
+    // highlights and richer mids than the old Reinhard, which washed everything
+    // toward grey. Exposure lifted slightly so midday terrain stays vivid.
+    color *= 1.05;
+    {
+        vec3 x = color;
+        const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+        color = clamp((x*(a*x+b))/(x*(c*x+d)+e), 0.0, 1.0);
+    }
 
     frag = vec4(color, u_alpha);
 }

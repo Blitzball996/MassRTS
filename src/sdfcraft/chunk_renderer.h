@@ -112,7 +112,7 @@ public:
 
     void render(World& world, const glm::mat4& view, const glm::mat4& proj,
                 glm::vec3 cam, glm::vec3 sun_dir, glm::vec3 fog_color,
-                float fog_start, float fog_end) {
+                float fog_start, float fog_end, float time = 0.0f) {
         glUseProgram(chunk_prog_);
         glUniformMatrix4fv(glGetUniformLocation(chunk_prog_, "u_view"), 1, GL_FALSE, &view[0][0]);
         glUniformMatrix4fv(glGetUniformLocation(chunk_prog_, "u_proj"), 1, GL_FALSE, &proj[0][0]);
@@ -121,6 +121,7 @@ public:
         glUniform3fv(glGetUniformLocation(chunk_prog_, "u_fog_color"), 1, &fog_color[0]);
         glUniform1f(glGetUniformLocation(chunk_prog_, "u_fog_start"), fog_start);
         glUniform1f(glGetUniformLocation(chunk_prog_, "u_fog_end"), fog_end);
+        glUniform1f(glGetUniformLocation(chunk_prog_, "u_time"), time);
         
         // Bind block textures (all materials use these)
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex_grass_);

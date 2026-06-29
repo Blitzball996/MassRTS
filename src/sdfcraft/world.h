@@ -157,6 +157,16 @@ public:
         Chunk* c = get_chunk(k, true);
         return c->get(floormod(wx, CHUNK_SX), wy, floormod(wz, CHUNK_SZ));
     }
+    // Read-only block access that NEVER creates a chunk (returns AIR if the chunk
+    // isn't loaded). Worker-thread-safe: the mob collision path uses this so it
+    // can't insert into chunks_ while the render thread iterates the map.
+    BlockId get_block_ro(int wx, int wy, int wz) const {
+        if (wy < 0 || wy >= CHUNK_SY) return BLOCK_AIR;
+        ChunkKey k = world_to_chunk(wx, wz);
+        auto it = chunks_.find(k);
+        if (it == chunks_.end()) return BLOCK_AIR;
+        return it->second.get(floormod(wx, CHUNK_SX), wy, floormod(wz, CHUNK_SZ));
+    }
     // returns true if the block actually changed
     bool set_block(int wx, int wy, int wz, BlockId b) {
         if (wy < 0 || wy >= CHUNK_SY) return false;
@@ -295,6 +305,33 @@ public:
         float c01 = c001*(1-fx) + c101*fx, c11 = c011*(1-fx) + c111*fx;
         float c0 = c00*(1-fy) + c10*fy, c1 = c01*(1-fy) + c11*fy;
         return c0*(1-fz) + c1*fz;
+    }
+
+    // CHEAP terrain solidity test for ENTITY collision (mobs). The full
+    // sample_sdf path costs ~40 FBM evals per call (8 corners x analytic_field's
+    // 5 surface_height_f gradient samples); a mob collider hits it hundreds of
+    // times per tick, x40 mobs x20 ticks = millions of FBM/s -> host/solo
+    // stutter. A boolean "is this point below the surface?" needs only ONE
+    // surface_height_f call: (wy-h)*inv < 0  <=>  wy < h  (inv is always > 0). We
+    // still honour carved/edited voxels (dug holes/placed terrain) via the cheap
+    // per-chunk SDF layer lookup. ~40x cheaper than sample_sdf, same surface.
+    //
+    // THREAD-SAFETY: get_chunk(k, /*create=*/FALSE). This is the collision path a
+    // worker thread runs every tick; if it created chunks it would INSERT into
+    // chunks_ while the render thread iterates it (ChunkRenderer::sync) -> crash.
+    // A not-yet-loaded chunk has no carved edits anyway, so we fall straight to
+    // the analytic surface — identical result, and the sim never mutates the map.
+    bool terrain_solid_cheap(float wx, float wy, float wz) {
+        if (wy < 0.0f) return true;
+        if (wy >= (float)CHUNK_SY) return false;
+        int ix = (int)std::floor(wx), iy = (int)std::floor(wy), iz = (int)std::floor(wz);
+        ChunkKey k = world_to_chunk(ix, iz);
+        Chunk* c = get_chunk(k, false);                // never creates (worker-safe)
+        if (c) {
+            float stored = c->get_sdf(floormod(ix, CHUNK_SX), iy, floormod(iz, CHUNK_SZ));
+            if (stored < 900.0f) return stored < 0.0f; // carved/edited voxel
+        }
+        return wy < surface_height_f(wx, wz);          // natural terrain (1 FBM call)
     }
 
     // Fine (0.5-unit) SDF gradient → smooth normal, independent of voxel size.

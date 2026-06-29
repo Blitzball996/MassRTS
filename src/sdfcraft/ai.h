@@ -18,6 +18,27 @@
 
 namespace sdfcraft {
 
+// Slab test: does the ray (origin o, unit dir d) pierce entity e's AABB within
+// max_t? Returns the near hit distance in `t`. Used by player melee targeting.
+inline bool ray_hits_aabb(glm::vec3 o, glm::vec3 d, const Entity& e,
+                          float max_t, float& t) {
+    const MobDef& m = e.def();
+    glm::vec3 lo(e.pos.x - m.width, e.pos.y,            e.pos.z - m.width);
+    glm::vec3 hi(e.pos.x + m.width, e.pos.y + m.height, e.pos.z + m.width);
+    float tmin = 0.0f, tmax = max_t;
+    for (int a = 0; a < 3; a++) {
+        float inv = (std::fabs(d[a]) > 1e-8f) ? 1.0f / d[a] : 1e8f;
+        float t1 = (lo[a] - o[a]) * inv;
+        float t2 = (hi[a] - o[a]) * inv;
+        if (t1 > t2) std::swap(t1, t2);
+        tmin = std::max(tmin, t1);
+        tmax = std::min(tmax, t2);
+        if (tmax < tmin) return false;
+    }
+    t = tmin;
+    return true;
+}
+
 // Deterministic-ish per-call RNG (seeded by caller for reproducibility).
 struct Rng {
     uint64_t s;
@@ -45,6 +66,7 @@ public:
         e.pos = pos;
         e.health = mob_def(k).max_health;
         e.yaw = rng_.range(0, 360);
+        e.lod_phase = (uint8_t)(next_id & 0xFF);   // stagger far-mob ticks
         entities.push_back(e);
         return entities.back();
     }
@@ -82,6 +104,36 @@ public:
         return player_dmg;
     }
 
+    // Player melee: find the closest live mob whose AABB is pierced by the look
+    // ray within `reach`, hit it for `dmg` and knock it back along the ray.
+    // Returns the mob hit (nullptr if the swing missed). Used by Mode for LMB
+    // attacks so the same crosshair that digs terrain also fights mobs.
+    Entity* attack_ray(glm::vec3 eye, glm::vec3 dir, float reach, float dmg) {
+        Entity* best = nullptr;
+        float best_t = reach;
+        for (auto& e : entities) {
+            if (!e.alive) continue;
+            float t;
+            if (ray_hits_aabb(eye, dir, e, reach, t) && t < best_t) {
+                best_t = t; best = &e;
+            }
+        }
+        if (best) {
+            best->hurt(dmg);
+            glm::vec3 kb = dir; kb.y = 0.0f;
+            if (glm::length(kb) > 1e-4f) kb = glm::normalize(kb);
+            best->vel += kb * 6.0f;       // horizontal shove
+            best->vel.y = std::max(best->vel.y, 3.5f);  // small pop-up
+            best->on_ground = false;      // now airborne: forces full-rate LOD tick
+                                          // so gravity pulls it straight back down
+                                          // (else a far mob hangs mid-air between
+                                          // its coarse ticks — the "float" bug).
+            // If the mob died, drop its loot into the world-less return path:
+            // caller reads alive flag + def().drop to award items.
+        }
+        return best;
+    }
+
     // Spawn/cull around the player to keep a populated but bounded world.
     void manage_population(World& world, glm::vec3 player_pos) {
         int hostile = 0, passive = 0;
@@ -108,11 +160,15 @@ private:
     bool sky_exposed(World& w, glm::vec3 p) {
         int x=(int)floorf(p.x), z=(int)floorf(p.z), y=(int)floorf(p.y+1.5f);
         for (int yy=y+1; yy<CHUNK_SY; yy++)
-            if (block_is_opaque(w.get_block(x,yy,z))) return false;
+            if (block_is_opaque(w.get_block_ro(x,yy,z))) return false;   // worker-safe
         return true;
     }
 
     // Find a valid ground spot in a ring around the player and spawn there.
+    // Uses surface_height (pure noise, no chunk) + read-only block checks so the
+    // spawner never creates a chunk on the sim thread (worker-safe). A spot whose
+    // chunk isn't loaded yet still spawns fine — it sits on the natural surface
+    // the height field reports, and streams in when the player approaches.
     bool try_spawn(World& world, glm::vec3 player_pos, bool hostile) {
         float ang = rng_.range(0, 6.2831853f);
         float dist = rng_.range(24.0f, 80.0f);
@@ -120,9 +176,10 @@ private:
         int z = (int)floorf(player_pos.z + sinf(ang)*dist);
         int h = world.surface_height(x, z);
         if (h <= 0 || h >= CHUNK_SY-3) return false;
-        // need 2 air blocks above a solid surface
-        if (!block_is_solid(world.get_block(x,h,z))) return false;
-        if (block_is_solid(world.get_block(x,h+1,z)) || block_is_solid(world.get_block(x,h+2,z)))
+        // need 2 air blocks above a solid surface (read-only; unloaded => natural)
+        if (!block_is_solid(world.get_block_ro(x,h,z)) && h+1 < CHUNK_SY) {
+            // chunk not loaded: trust the height field — surface at h is solid
+        } else if (block_is_solid(world.get_block_ro(x,h+1,z)) || block_is_solid(world.get_block_ro(x,h+2,z)))
             return false;
         glm::vec3 sp((float)x+0.5f, (float)(h+1), (float)z+0.5f);
         MobKind k = hostile ? pick_hostile() : pick_passive();
@@ -150,7 +207,7 @@ private:
             else {
                 float a = rng_.range(0, 6.2831853f);
                 e.wander_dir = glm::vec3(cosf(a), 0, sinf(a));
-                e.yaw = glm::degrees(a);
+                e.yaw = glm::degrees(atan2f(e.wander_dir.x, -e.wander_dir.z));
                 e.ai_timer = rng_.range(2, 5);
             }
         }
@@ -165,7 +222,7 @@ private:
         // detection range
         if (d2 < 32.0f && d2 > 0.01f) {
             glm::vec3 dir = to / d2;
-            e.yaw = glm::degrees(atan2f(dir.z, dir.x));
+            e.yaw = glm::degrees(atan2f(dir.x, -dir.z));
             if (d2 > 1.4f) {
                 apply_move(world, e, dir, md.move_speed, want, jump);
             } else if (md.attack_dmg > 0.0f && e.attack_cooldown <= 0.0f) {

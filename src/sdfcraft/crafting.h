@@ -55,6 +55,23 @@ public:
 
     const std::vector<Recipe>& all() const { return recipes_; }
 
+    // --- console-style recipe list support ----------------------------------
+    // The R crafting screen lists every recipe and crafts the picked one if the
+    // inventory holds the ingredients (no manual grid). Flatten a recipe to a
+    // multiset of (item -> count) so the screen can check affordability + spend.
+    struct Need { ItemId id; int count; };
+    static std::vector<Need> recipe_needs(const Recipe& r) {
+        std::vector<Need> needs;
+        auto bump = [&](ItemId id){
+            if (id == ITEM_NONE) return;
+            for (auto& n : needs) if (n.id == id) { n.count++; return; }
+            needs.push_back({id, 1});
+        };
+        if (r.shapeless) for (ItemId id : r.ingredients) bump(id);
+        else             for (int i = 0; i < r.w * r.h; i++) bump(r.pattern[i]);
+        return needs;
+    }
+
 private:
     std::vector<Recipe> recipes_;
     std::vector<std::pair<ItemId, CraftResult>> smelting_;
@@ -92,6 +109,11 @@ private:
         add_tool_set(I, S, ITEM_IRON_PICKAXE, ITEM_IRON_AXE, ITEM_IRON_SHOVEL, ITEM_IRON_SWORD);
         add_tool_set(D, S, ITEM_DIAMOND_PICKAXE, ITEM_DIAMOND_AXE, ITEM_DIAMOND_SHOVEL, ITEM_DIAMOND_SWORD);
 
+        // --- armor (helmet / chestplate / leggings / boots) per material ---
+        add_armor_set(ITEM_LEATHER, ITEM_LEATHER_HELMET, ITEM_LEATHER_CHEST, ITEM_LEATHER_LEGS, ITEM_LEATHER_BOOTS);
+        add_armor_set(I,            ITEM_IRON_HELMET,    ITEM_IRON_CHEST,    ITEM_IRON_LEGS,    ITEM_IRON_BOOTS);
+        add_armor_set(D,            ITEM_DIAMOND_HELMET, ITEM_DIAMOND_CHEST, ITEM_DIAMOND_LEGS, ITEM_DIAMOND_BOOTS);
+
         // --- food (Phase E adds wheat->bread once farming exists) ---
 
         // --- smelting (furnace) ---
@@ -110,6 +132,16 @@ private:
         recipes_.push_back(shaped(2,3,{mat,mat, mat,stick, X,stick}, axe, 1));
         recipes_.push_back(shaped(1,3,{mat,stick,stick}, shovel, 1));
         recipes_.push_back(shaped(1,3,{mat,mat,stick}, sword, 1));
+    }
+
+    // Armor set (MC patterns): helmet 3x2 MMM/M_M; chest 3x3 M_M/MMM/MMM;
+    // leggings 3x3 MMM/M_M/M_M; boots 3x2 M_M/M_M.
+    void add_armor_set(ItemId mat, ItemId helmet, ItemId chest, ItemId legs, ItemId boots) {
+        const ItemId X = ITEM_NONE;
+        recipes_.push_back(shaped(3,2,{mat,mat,mat, mat,X,mat}, helmet, 1));
+        recipes_.push_back(shaped(3,3,{mat,X,mat, mat,mat,mat, mat,mat,mat}, chest, 1));
+        recipes_.push_back(shaped(3,3,{mat,mat,mat, mat,X,mat, mat,X,mat}, legs, 1));
+        recipes_.push_back(shaped(3,2,{mat,X,mat, mat,X,mat}, boots, 1));
     }
 
     // --- matchers ---

@@ -16,10 +16,10 @@
 ## 0. 进度总览（每个系统完成并自测后打勾）
 
 - [x] 阶段 A：基础设施与模式骨架（独立 SDFCraft.exe + 第一人称 + 区块世界渲染）
-- [~] 阶段 B：最小可玩循环（MVP）（单机挖/放/走已通；多人同步待 N 阶段网络层接入）
+- [~] 阶段 B：最小可玩循环（MVP）（单机挖/放/走已通；多人挖/放/看见彼此已通 — 见 B3/B5）
 - [~] 阶段 C：物品 / 背包 / 合成（物品/工具/合成/熔炼逻辑已通；容器UI与掉落实体待 F/O）
-- [ ] 阶段 D：实体 / 生物 / AI
-- [ ] 阶段 E：战斗 / 生存数值
+- [~] 阶段 D：实体 / 生物 / AI（怪物刷新/AI/近战/掉落 + 昼夜驱动夜间刷怪已接入并服务器权威同步；寻路A*/被动繁殖/特殊行为待补）
+- [~] 阶段 E：战斗 / 生存数值（生命/饥饿/氧气/饿死/溺水/摔落 + 玩家近战反击 + 吃食物已通；护甲/经验/远程待补）
 - [ ] 阶段 F：方块功能与方块实体（容器/熔炉/工作台）
 - [ ] 阶段 G：红石系统
 - [ ] 阶段 H：维度系统（魔影世界/末地/天空岛）
@@ -164,11 +164,10 @@ client = 连接服务器，本地预测 + 网络确认
 - [x] 飞行/创造模式切换（F 键）
 
 ### A3. 角色模型复用
-- [ ] 从 MinecraftConsoles 提取 Steve/Alex 模型几何 + 皮肤材质
-  - MC 角色是程序化立方体模型（`HumanoidModel`），非 .mesh 格式
-  - 方案：用 MassRTS 的 `SkinnedModel`（.mesh/.anim）格式重建一个人形，或直接程序化立方体人形
-  - 皮肤纹理：复用 MC 的 `char.png` / DummyTexturePack
-- [ ] 第三人称/第一人称手臂渲染
+- [x] 从 MinecraftConsoles 移植程序化立方体盒rig（humanoid / quadruped / creeper）+ 加载其 mob/*.png 皮肤
+      （`src/sdfcraft/mc_model.h::McModelRenderer`，皮肤拷至 `assets/textures/mob/`，CMake 自动随构建拷到运行目录）
+- [x] 第三人称怪物 / 远程玩家渲染（贴图盒rig + 走路摆肢动画）
+- [ ] 第一人称手臂渲染（持有物）
 
 ### A4. 混合体素渲染
 - [x] 区块方块层（每 voxel 一个 uint8 方块 id，`world.h` `Chunk::blocks`）
@@ -197,18 +196,25 @@ client = 连接服务器，本地预测 + 网络确认
 - [ ] **网络：** `VoxelPlayerActionPacket(PLACE)`，服务器扣背包 + 广播（待 N 阶段）
 
 ### B3. 玩家移动同步
-- [ ] 4 字节增量移动包（移植 `MoveEntityPacketSmall` 位打包），见 DUAL_MODE_NETWORK 1.3
-- [ ] 其他玩家实体渲染（用 A3 的角色模型）
-- [ ] 快照插值（平滑其他玩家移动）
+- [x] 玩家位置/朝向增量上行（`PlayerMove`，~20Hz 节流）+ 服务器 Roster 下发
+- [x] 其他玩家实体渲染（MC 真模型 humanoid，A3 完成）
+- [x] 快照插值（远程玩家 + 怪物按 id 匹配做 10Hz 快照间渲染插值，含 yaw 最短角插值）
 
 ### B4. 区块流式同步
-- [ ] 兴趣管理：服务器按玩家位置推送区块（`VoxelChunkVisibility` + `VoxelChunkData`）
-- [ ] 客户端按需请求 + 卸载远区块
-- [ ] 已有骨架 `VoxelNetEngine::serverUpdatePlayerView`
+- [x] 客户端按种子重建世界（Welcome 下发 seed，确定性生成本地区块）
+- [x] DELTA 同步：服务器维护权威编辑日志（cap 4096），新客户端 Welcome 后回放全量 Edit，
+      late-joiner 重建"自然层(种子)+编辑回放"= 精确世界（`test_net_transport` 覆盖）
+- [ ] 兴趣管理 AOI：按玩家位置只回放/推送附近区块的编辑（当前全量回放，已注明为后续）
+- [ ] 客户端按需请求 + 卸载远区块（编辑已 delta 化；自然层仍各自生成）
 
 ### B5. Listen / Dedicated server
-- [ ] Listen：主机进程内起 VoxelNetEngine 服务 + 本地客户端
-- [ ] Dedicated：`--sdfcraft-server`，无渲染主循环，纯逻辑 tick（20Hz，参考 MC `MAX_TICKS_WITHOUT_INPUT`）
+- [x] Listen：主机进程内起 GameServer（权威 ServerSim）+ 本地玩家 slot 0（`--host`）
+- [x] Dedicated：`--server`，无渲染 20Hz 逻辑循环（`runDedicatedServer`），预生成出生区
+- [x] 一键测试 bat：`play_multiplayer.bat`（host+client）、`dedicated_server.bat`
+
+**B 阶段网络自测：** 2026-06，`test_net_transport.exe` 全绿 — 真 TCP 双客户端加入拿到不同 id、
+种子同步、主机编辑广播到客户端、客户端 EditIntent 被服务器权威应用；headless 客户端连 dedicated
+server 成功（服务器日志 `players=1 mobs=34`，按玩家位置权威刷怪）。✅
 
 **B 阶段自测：** 两个客户端连同一服务器，A 挖的坑/放的方块 B 实时看到，互相看到角色移动。
 

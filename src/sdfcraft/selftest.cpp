@@ -4,9 +4,12 @@
 #include "sdfcraft/player.h"
 #include "sdfcraft/mc_mesher.h"
 #include "sdfcraft/net_ops.h"
+#include "sdfcraft/net_protocol.h"
+#include "sdfcraft/server_sim.h"
 #include "sdfcraft/planet.h"
 #include "sdfcraft/planet_mesh.h"
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cassert>
 using namespace sdfcraft;
@@ -15,6 +18,7 @@ static int fails = 0;
 #define CHECK(c) do{ if(!(c)){ printf("FAIL: %s (line %d)\n", #c, __LINE__); fails++; } }while(0)
 
 int main() {
+    setvbuf(stdout, nullptr, _IONBF, 0);   // unbuffered: last line printed = where it died
     RecipeBook rb;
 
     // log -> 4 planks (shapeless)
@@ -231,6 +235,143 @@ int main() {
         // re-applying the same snapshot is a no-op (deduped).
         CHECK(latejoin.applySnapshot(snap) == 0);
         printf("NET BACKFILL: late joiner replayed %d edits, world matches host\n", back);
+    }
+
+    // --- protocol round-trip: encode -> decode every message type ----------
+    {
+        // Welcome
+        { auto b = enc_welcome(7, 0xABCDEF, 0.5f, 3);
+          ByteReader r(b.data(), b.size()); CHECK(r.type()==MsgType::Welcome);
+          uint8_t id; uint64_t seed; float tod; uint32_t day;
+          CHECK(r.get(id)&&r.get(seed)&&r.get(tod)&&r.get(day));
+          CHECK(id==7 && seed==0xABCDEF && tod==0.5f && day==3); }
+        // Edit (carve)
+        { NetEdit e{1, 2, 1.f,2.f,3.f, 2.5f, -1};
+          auto b = enc_edit(MsgType::Edit, e);
+          ByteReader r(b.data(), b.size()); CHECK(r.type()==MsgType::Edit);
+          NetEdit o; CHECK(r.get(o));
+          CHECK(o.kind==1 && o.author==2 && o.x==1.f && o.radius==2.5f && o.material==-1); }
+        // PlayerMove
+        { NetPlayerState s{4, 10.f,64.f,-3.f, 90.f, -10.f, 1};
+          auto b = enc_move(s); ByteReader r(b.data(), b.size());
+          NetPlayerState o; CHECK(r.get(o));
+          CHECK(o.id==4 && o.x==10.f && o.yaw==90.f && o.moving==1); }
+        // MobSnapshot (variable length)
+        { std::vector<NetMob> snap = {
+            {1,(uint8_t)MobKind::Zombie, 1,2,3, 45.f, 20.f, 1, 0},
+            {2,(uint8_t)MobKind::Pig,    4,5,6, 12.f, 10.f, 0, 1} };
+          auto b = enc_mob_snapshot(snap); ByteReader r(b.data(), b.size());
+          CHECK(r.type()==MsgType::MobSnapshot);
+          std::vector<NetMob> out; CHECK(dec_mob_snapshot(r, out));
+          CHECK(out.size()==2 && out[0].id==1 && out[1].kind==(uint8_t)MobKind::Pig);
+          CHECK(out[0].moving==1 && out[1].moving==0);
+          CHECK(out[0].hurt==0 && out[1].hurt==1); }
+        printf("PROTO: all message types round-trip ok\n");
+    }
+
+    // --- authoritative ServerSim: time, spawn, survival, combat ------------
+    {
+        World w(4242);
+        // pre-generate spawn disk so mobs have ground
+        ChunkKey c0 = World::world_to_chunk(0,0);
+        for (int dz=-3; dz<=3; dz++) for (int dx=-3; dx<=3; dx++)
+            w.get_chunk({c0.cx+dx, c0.cz+dz}, true);
+        ServerSim sim(w, 4242);
+        ServerPlayer& p = sim.addPlayer(0, "tester");
+        CHECK(p.active && p.avatar.health == 20.0f);
+
+        // time advances and wraps into a new day; night flips at the right phase
+        sim.time_of_day = 0.95f;
+        for (int i=0;i<200;i++) sim.tick(0.5f);   // 100s of sim time
+        CHECK(sim.day >= 1);                       // crossed midnight at least once
+
+        // force night + spawn pressure: hostiles should appear around the player
+        sim.time_of_day = 0.0f;                    // deep night
+        for (int i=0;i<40;i++) sim.tick(0.1f);
+        int hostiles = 0;
+        for (auto& e : sim.mobs.entities)
+            if (e.def().hostility == Hostility::Hostile) hostiles++;
+        CHECK(!sim.mobs.entities.empty());         // something spawned at night
+        printf("SIM: day=%u mobs=%zu hostiles=%d\n", sim.day, sim.mobs.entities.size(), hostiles);
+
+        // sun dips below horizon at night, rises at noon (drives lighting)
+        CHECK(ServerSim::daylight(0.5f) > 0.9f);   // noon ~ full daylight
+        CHECK(ServerSim::daylight(0.0f) < 0.2f);   // midnight ~ dark
+
+        // combat: isolated sim (daytime, no hostile crowd) so the pig is the
+        // only thing the ray can hit. Aim from eye -> pig body centre.
+        ServerSim csim(w, 4242);
+        csim.time_of_day = 0.5f;                   // noon: no hostile spawns to clutter
+        csim.addPlayer(0, "fighter");
+        glm::vec3 eye(0.5f, (float)w.surface_height(0,0)+1.6f, 0.5f);
+        glm::vec3 pig_feet(0.5f, (float)w.surface_height(0,3), 3.5f);
+        Entity& pig = csim.mobs.spawn(MobKind::Pig, pig_feet);
+        glm::vec3 pig_centre = pig_feet + glm::vec3(0, pig.def().height*0.5f, 0);
+        glm::vec3 fwd = glm::normalize(pig_centre - eye);
+        float hp0 = pig.health;
+        ItemId drop=ITEM_NONE; uint8_t dn=0;
+        Entity* hit = csim.attack(eye, fwd, 8.0f, 100.0f, &drop, &dn);
+        CHECK(hit != nullptr);                     // ray pierced the pig's AABB
+        if (hit) {
+            CHECK(hit->health < hp0);              // took damage
+            CHECK(!hit->alive && drop == ITEM_PORKCHOP); // 100 dmg killed it, dropped pork
+        }
+        printf("SIM COMBAT: melee ray hit + kill + drop ok\n");
+
+        // survival: starving player loses health (use the calm noon sim)
+        ServerPlayer* sp = csim.player(0);
+        sp->avatar.hunger = 0.0f; sp->avatar.saturation = 0.0f;
+        float h0 = sp->avatar.health;
+        for (int i=0;i<120;i++) csim.tick(0.1f);    // 12s of starvation
+        CHECK(sp->avatar.health < h0);
+        printf("SIM SURVIVAL: starvation drains health (%.0f -> %.0f)\n", h0, sp->avatar.health);
+    }
+
+    // --- armor: recipes craft, worn armor reduces mob melee damage ----------
+    {
+        // recipes exist for a full iron set
+        ItemId I = ITEM_IRON_INGOT;
+        { ItemId g[6]={I,I,I, I,ITEM_NONE,I}; auto r=rb.match(g,3,2); CHECK(r.id==ITEM_IRON_HELMET); }
+        { ItemId g[9]={I,ITEM_NONE,I, I,I,I, I,I,I}; auto r=rb.match(g,3,3); CHECK(r.id==ITEM_IRON_CHEST); }
+        { ItemId g[9]={I,I,I, I,ITEM_NONE,I, I,ITEM_NONE,I}; auto r=rb.match(g,3,3); CHECK(r.id==ITEM_IRON_LEGS); }
+        { ItemId g[6]={I,ITEM_NONE,I, I,ITEM_NONE,I}; auto r=rb.match(g,3,2); CHECK(r.id==ITEM_IRON_BOOTS); }
+        // armor metadata
+        CHECK(item_is_armor(ITEM_IRON_CHEST) && item_armor_slot(ITEM_IRON_CHEST)==ArmorSlot::Chest);
+        // worn full iron set: total_armor > 0 and damage is reduced
+        Inventory iv;
+        iv.armor[0].id=ITEM_IRON_HELMET; iv.armor[0].count=1;
+        iv.armor[1].id=ITEM_IRON_CHEST;  iv.armor[1].count=1;
+        iv.armor[2].id=ITEM_IRON_LEGS;   iv.armor[2].count=1;
+        iv.armor[3].id=ITEM_IRON_BOOTS;  iv.armor[3].count=1;
+        float ap = total_armor(iv);
+        CHECK(ap > 8.0f);   // 2.5+3.5+3.0+2.0 = 11
+        float reduce = ap*0.04f; if (reduce>0.8f) reduce=0.8f;
+        CHECK(reduce > 0.3f && reduce < 0.8f);   // ~44% mitigation, sane
+        printf("ARMOR: iron set recipes ok, %.0f armor pts -> %.0f%% damage cut\n", ap, reduce*100);
+    }
+
+    // --- perf: a populated sim must tick well under one 20Hz frame (50ms) -----
+    // Guards the host/solo stutter regression: mob collision used to call the
+    // full trilinear sample_sdf (~40 FBM/call) hundreds of times per tick; the
+    // cheap terrain_solid_cheap (1 FBM/call) must keep a 40-mob world fast.
+    {
+        World pw(7);
+        ChunkKey c0 = World::world_to_chunk(0,0);
+        for (int dz=-4; dz<=4; dz++) for (int dx=-4; dx<=4; dx++)
+            pw.get_chunk({c0.cx+dx, c0.cz+dz}, true);
+        ServerSim sim(pw, 7);
+        sim.addPlayer(0, "perf");
+        sim.time_of_day = 0.0f;                 // night: fill toward hostile cap
+        for (int i=0;i<60;i++) sim.tick(0.1f);  // warm up + spawn a crowd
+        size_t mobs = sim.mobs.entities.size();
+        auto t0 = std::chrono::steady_clock::now();
+        const int N = 200;
+        for (int i=0;i<N;i++) sim.tick(0.05f);  // 200 ticks @ 20Hz
+        double ms = std::chrono::duration<double,std::milli>(
+                        std::chrono::steady_clock::now()-t0).count();
+        double per = ms / N;
+        printf("PERF: %zu mobs, %.3f ms/tick (budget 50ms @20Hz)\n", mobs, per);
+        CHECK(per < 50.0);                      // must fit a server frame
     }
 
     if (fails == 0) printf("ALL SDFCRAFT TESTS PASSED\n");

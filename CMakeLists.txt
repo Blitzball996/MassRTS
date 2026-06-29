@@ -189,6 +189,14 @@ add_custom_command(TARGET SDFCraft POST_BUILD
     ${CMAKE_SOURCE_DIR}/shaders
     $<TARGET_FILE_DIR:SDFCraft>/shaders
 )
+# Mob skins + block textures must sit next to the exe so SDFCraft loads them at
+# runtime (it reads "assets/textures/..."). Without this a clean build dir has
+# no skins and mobs fall back to flat colours. Copy the whole textures tree.
+add_custom_command(TARGET SDFCraft POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    ${CMAKE_SOURCE_DIR}/assets/textures
+    $<TARGET_FILE_DIR:SDFCraft>/assets/textures
+)
 
 # === PlanetViewer (Phase P1: fly around a real-scale 6371km planet) ===
 add_executable(PlanetViewer src/main_planet.cpp)

@@ -39,6 +39,9 @@ static constexpr uint8_t STACK_MAX = 64;
 class Inventory {
 public:
     std::array<ItemStack, INV_SLOTS> slots{};
+    // Worn armor: [0]=head [1]=chest [2]=legs [3]=feet. Separate from `slots` so
+    // equipping is just moving a stack here; total defense sums these.
+    std::array<ItemStack, 4> armor{};
     int selected = 0;  // active hotbar slot [0, HOTBAR_SLOTS)
 
     ItemStack& held() { return slots[selected]; }
@@ -79,6 +82,27 @@ public:
     void scroll(int dir) {
         selected = (selected + dir) % HOTBAR_SLOTS;
         if (selected < 0) selected += HOTBAR_SLOTS;
+    }
+
+    // --- bulk queries / removal (used by the R crafting screen) -------------
+    // Total count of an item across all main+hotbar slots.
+    int count(ItemId id) const {
+        int n = 0;
+        for (const ItemStack& s : slots) if (s.id == id) n += s.count;
+        return n;
+    }
+    // Remove up to `n` of an item from slots (lowest slot first). Returns how
+    // many were actually removed.
+    int remove(ItemId id, int n) {
+        int removed = 0;
+        for (ItemStack& s : slots) {
+            if (n <= 0) break;
+            if (s.id != id || s.count == 0) continue;
+            int take = s.count < n ? s.count : n;
+            s.count -= (uint8_t)take; n -= take; removed += take;
+            if (s.count == 0) s.clear();
+        }
+        return removed;
     }
 };
 

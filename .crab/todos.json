@@ -1,0 +1,39 @@
+{
+  "todos": [
+    {
+      "activeForm": "Removing war banners/flags",
+      "content": "Remove war banners/flags from decor",
+      "status": "completed"
+    },
+    {
+      "activeForm": "Fixing terrain stripe artifact",
+      "content": "Diagnose and fix terrain stripe/dirty-ground artifact",
+      "status": "in_progress"
+    },
+    {
+      "activeForm": "Building HDR/Bloom post stack",
+      "content": "HDR + Bloom + tonemapping post-processing stack",
+      "status": "pending"
+    },
+    {
+      "activeForm": "Overhauling particle system",
+      "content": "Particle overhaul: billboard flipbook, soft particles, lifecycle curves, sub-emitters",
+      "status": "pending"
+    },
+    {
+      "activeForm": "Adding projectile trails",
+      "content": "Projectile HDR glow core plus trail ribbon",
+      "status": "pending"
+    },
+    {
+      "activeForm": "Implementing RVO avoidance",
+      "content": "RVO obstacle avoidance between units",
+      "status": "pending"
+    },
+    {
+      "activeForm": "Building menu system",
+      "content": "Menu system (levels, graphics, audio, controls, single/multi)",
+      "status": "pending"
+    }
+  ]
+}

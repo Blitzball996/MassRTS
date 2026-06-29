@@ -220,6 +220,11 @@ add_executable(validate_sdfcraft src/sdfcraft/gameplay_validator.cpp)
 target_include_directories(validate_sdfcraft PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(validate_sdfcraft PRIVATE glm::glm)
 
+# === SDFCraft terrain height probe (no GL) — verifies mountain generation ===
+add_executable(height_probe tools/height_probe.cpp)
+target_include_directories(height_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(height_probe PRIVATE glm::glm)
+
 
 # === SDFCraft real TCP EditTransport test (sockets, no GL) ===
 add_executable(test_net_transport src/sdfcraft/test_net_transport.cpp)

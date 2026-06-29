@@ -19,10 +19,11 @@
 #include "crafting.h"
 #include "chunk_renderer.h"
 #include "hud_renderer.h"
-#include "inventory_screen_mc.h"
-#include "craft_screen_mc.h"
+#include "inventory_screen_exact.h"
+#include "crafting_screen_exact.h"
 #include "mc_model.h"
 #include "sky_renderer.h"
+#include "player_preview.h"
 #include "world_ops.h"
 #include "server_sim.h"
 #include "game_server.h"
@@ -403,15 +404,17 @@ public:
         if (last_hit_.hit)
             renderer_.render_selection(view, proj, glm::ivec3(last_hit_.bx, last_hit_.by, last_hit_.bz));
 
-        // 2D HUD overlay last, on top of everything.
-        if (hud_ready_)
+        // 2D HUD overlay last, on top of everything — but NOT while a full-screen
+        // GUI is open, or its hotbar/bars draw *under* the inventory panel and you
+        // see a duplicate hotbar at the bottom (the inventory has its own hotbar row).
+        if (hud_ready_ && !inv_open_ && !craft_open_)
             hud_.draw(fb_w, fb_h, player, inv);
 
         // remember fb size for GUI hit-testing this frame
         last_fbw_ = fb_w; last_fbh_ = fb_h;
         // inventory/crafting screens draw on top of the HUD when open
         if (inv_open_ && inv_scr_ready_)
-            inv_screen_.draw(inv, recipes, fb_w, fb_h, last_cursor_x_, last_cursor_y_);
+            inv_screen_.draw(player, inv, recipes, mobs_rend_, fb_w, fb_h, last_cursor_x_, last_cursor_y_, time_);
         if (craft_open_ && craft_scr_ready_)
             craft_screen_.draw(inv, recipes, fb_w, fb_h, last_cursor_x_, last_cursor_y_);
     }
@@ -458,10 +461,10 @@ private:
     ChunkRenderer  renderer_;
     HudRenderer    hud_;
     bool           hud_ready_ = false;
-    InventoryScreenMC inv_screen_;
+    InventoryScreenExact inv_screen_;
     bool           inv_scr_ready_ = false;
     bool           inv_open_ = false;
-    CraftScreenMC  craft_screen_;
+    CraftingScreenExact craft_screen_;
     bool           craft_scr_ready_ = false;
     bool           craft_open_ = false;
     int            last_fbw_ = 1600, last_fbh_ = 900;

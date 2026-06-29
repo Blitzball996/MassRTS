@@ -79,6 +79,29 @@ struct Noise {
         }
         return sum / norm;
     }
+    // value noise centred to [-1,1] (so a ridge fold around 0 works).
+    float signed_value(float x, float z, float freq) const { return value(x, z, freq) * 2.0f - 1.0f; }
+    // Ridged multifractal: fold each octave to a sharp crest (1-|n|), square it
+    // for crisp ridgelines, and weight high octaves by the low-octave amplitude so
+    // detail only appears on the flanks of big ridges (classic Musgrave ridged MF).
+    // This is what turns rolling fBm hills into branching mountain ranges + valleys.
+    float ridged(float x, float z, float freq, int octaves) const {
+        float sum = 0, amp = 0.5f, prev = 1.0f, norm = 0;
+        for (int i = 0; i < octaves; i++) {
+            float n = signed_value(x, z, freq);
+            n = 1.0f - std::fabs(n);     // fold: crest at 0 -> 1
+            n *= n;                      // sharpen ridge
+            n *= prev;                   // detail rides on bigger ridges
+            sum += n * amp; norm += amp;
+            prev = n; freq *= 2.0f; amp *= 0.5f;
+        }
+        return norm > 0 ? sum / norm : 0.0f;   // [0,1], 1 on ridgelines
+    }
+    static float smoothstep(float a, float b, float x) {
+        float t = (x - a) / (b - a);
+        t = t < 0 ? 0 : (t > 1 ? 1 : t);
+        return t * t * (3 - 2 * t);
+    }
 };
 
 struct Chunk {
@@ -203,12 +226,52 @@ public:
     }
     // Continuous (float) surface height — used by the analytic SDF so the
     // isosurface is smooth instead of snapping to integer block tops.
+    //
+    // Multi-noise composite (cheap, deterministic, seam-continuous):
+    //   1. CONTINENT MASK  — very low freq fBm decides lowland vs. highland, so
+    //      mountains cluster into ranges with plains/basins between them instead
+    //      of uniform bumpiness everywhere.
+    //   2. DOMAIN WARP     — offset the sample coords by another noise field, so
+    //      ridges meander and branch like real ranges (kills grid-aligned look).
+    //   3. ROLLING HILLS   — ordinary fBm, the gentle base relief everywhere.
+    //   4. RIDGED MOUNTAINS— ridged multifractal (sharp crests + carved valleys),
+    //      gated by the continent mask so it only erupts in highland regions.
+    // Peak budget keeps the tallest summits a few blocks under CHUNK_SY (128) so
+    // snow-cap / tree headroom never clips the top of the world.
     float surface_height_f(float wx, float wz) {
         Noise& n = noise_;
-        float base = n.fbm(wx, wz, 1.0f / 96.0f, 5);
-        float mountain = n.fbm(wx + 4000.0f, wz - 4000.0f, 1.0f / 220.0f, 4);
-        mountain = mountain * mountain;
-        return sea_level - 6.0f + base * 26.0f + mountain * 48.0f;
+
+        // 1. continent mask: 0 = deep lowland, 1 = full highland
+        float cont = n.fbm(wx - 8000.0f, wz + 8000.0f, 1.0f / 620.0f, 3);
+        float mtn_mask = Noise::smoothstep(0.42f, 0.72f, cont);
+
+        // 2. domain warp (continuous offset in world units)
+        float wxo = n.fbm(wx + 1000.0f, wz - 3000.0f, 1.0f / 200.0f, 3) - 0.5f;
+        float wzo = n.fbm(wx - 5000.0f, wz + 7000.0f, 1.0f / 200.0f, 3) - 0.5f;
+        float warp = 34.0f;
+        float mx = wx + wxo * warp, mz = wz + wzo * warp;
+
+        // 3. rolling base relief (everywhere)
+        float base = n.fbm(wx, wz, 1.0f / 110.0f, 5);          // 0..1
+
+        // 4. ridged mountains on warped coords, gated by the mask
+        float ridge = n.ridged(mx + 4000.0f, mz - 4000.0f, 1.0f / 260.0f, 5);  // 0..1, 1 on crests
+        ridge *= ridge;                                         // extra crest contrast
+
+        float h = sea_level - 8.0f
+                + base * 20.0f                                  // gentle hills: ±~20
+                + mtn_mask * ridge * 50.0f;                     // ranges: up to ~50 over highland
+        // hard clamp well under the ceiling so snow caps / placed blocks have room
+        if (h > (float)(CHUNK_SY - 10)) h = (float)(CHUNK_SY - 10);
+        return h;
+    }
+
+    // Surface slope (|∇height|) at a column — drives rock-vs-grass on steep faces.
+    float surface_slope(float wx, float wz) {
+        float e = 1.0f;
+        float hx = surface_height_f(wx + e, wz) - surface_height_f(wx - e, wz);
+        float hz = surface_height_f(wx, wz + e) - surface_height_f(wx, wz - e);
+        return std::sqrt(hx*hx + hz*hz) / (2.0f * e);
     }
 
     // Pristine analytic SDF at a world point (continuous). Negative = solid,
@@ -677,12 +740,22 @@ private:
     }
 
     BlockId surface_block(int wx, int wz, int h) {
-        // Mostly grass world (Minecraft-style green plains)
-        if (h <= sea_level) return BLOCK_SAND;  // underwater/beach only
-        if (h > sea_level + 42) return BLOCK_SNOW;  // high mountain peaks only
-        
-        // Everything else is grass (green world)
-        return BLOCK_GRASS;
+        // Beach / seabed.
+        if (h <= sea_level) return BLOCK_SAND;
+        if (h <= sea_level + 1) return BLOCK_SAND;
+
+        // Mountains expose bare rock on steep faces and snow on the high peaks,
+        // so ranges read as stone-and-snow instead of grass all the way up. The
+        // thresholds use BOTH absolute height and local slope (cliffs go rocky
+        // even at mid altitude — what makes mountainsides look carved).
+        float slope = surface_slope((float)wx, (float)wz);
+        int snow_line = sea_level + 46;
+        int rock_line = sea_level + 28;
+
+        if (h > snow_line) return BLOCK_SNOW;                 // snowy summits
+        if (slope > 1.15f) return BLOCK_STONE;                // cliffs / steep faces: bare rock
+        if (h > rock_line && slope > 0.7f) return BLOCK_STONE; // high rocky shoulders
+        return BLOCK_GRASS;                                    // green lowland & gentle slopes
     }
 
     BlockId maybe_ore(int wx, int wy, int wz) {

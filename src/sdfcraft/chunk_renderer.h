@@ -9,6 +9,7 @@
 // =============================================================================
 #include <glad/glad.h>
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #include "world.h"
 #include "mesher.h"
 #include "mc_mesher.h"
@@ -31,8 +32,10 @@ public:
     bool init(const std::string& shader_dir) {
         chunk_prog_  = load_program(shader_dir + "sdfcraft_chunk.vert",  shader_dir + "sdfcraft_chunk.frag");
         select_prog_ = load_program(shader_dir + "sdfcraft_select.vert", shader_dir + "sdfcraft_select.frag");
+        depth_prog_  = load_program(shader_dir + "sdfcraft_depth.vert",  shader_dir + "sdfcraft_depth.frag");
         if (!chunk_prog_ || !select_prog_) return false;
         init_select_box();
+        if (depth_prog_) init_shadow_fbo();
         
         // Load block textures (3DWorld assets)
         tex_grass_      = load_texture("assets/textures/blocks/grass.png");
@@ -55,9 +58,12 @@ public:
         if (select_vao_) { glDeleteVertexArrays(1, &select_vao_); glDeleteBuffers(1, &select_vbo_); }
         if (chunk_prog_)  glDeleteProgram(chunk_prog_);
         if (select_prog_) glDeleteProgram(select_prog_);
-        
+        if (depth_prog_)  glDeleteProgram(depth_prog_);
+        if (shadow_fbo_)  glDeleteFramebuffers(1, &shadow_fbo_);
+        if (shadow_tex_)  glDeleteTextures(1, &shadow_tex_);
+
         // Clean up textures
-        GLuint textures[] = {tex_grass_, tex_dirt_, tex_rock_, tex_rock2_, tex_sand_, 
+        GLuint textures[] = {tex_grass_, tex_dirt_, tex_rock_, tex_rock2_, tex_sand_,
                              tex_snow_, tex_gravel_, tex_mossy_rock_, tex_wood_, tex_bark_};
         glDeleteTextures(10, textures);
     }
@@ -110,6 +116,48 @@ public:
         }
     }
 
+    // Render all loaded chunk geometry from the sun's POV into the shadow depth
+    // map. Call once per frame BEFORE render(). The light frustum is an ortho box
+    // fitted around the camera so shadow resolution stays concentrated near the
+    // player. Returns false (and render() falls back to no shadows) if the FBO
+    // wasn't created.
+    bool shadow_pass(glm::vec3 cam, glm::vec3 sun_dir) {
+        if (!depth_prog_ || !shadow_fbo_) return false;
+        // Light looks from the sun toward the camera region. Ortho half-extent
+        // covers a generous radius around the player; depth range spans the world
+        // height so tall mountains still cast.
+        glm::vec3 L = glm::normalize(sun_dir);
+        if (L.y < 0.05f) return false;   // sun at/below horizon: skip (night)
+        float R = 140.0f;                // XZ coverage radius around camera
+        glm::vec3 center = glm::vec3(cam.x, 64.0f, cam.z);
+        glm::vec3 eye = center + L * 300.0f;
+        glm::vec3 up = std::fabs(L.y) > 0.99f ? glm::vec3(1,0,0) : glm::vec3(0,1,0);
+        glm::mat4 lview = glm::lookAt(eye, center, up);
+        glm::mat4 lproj = glm::ortho(-R, R, -R, R, 10.0f, 600.0f);
+        light_vp_ = lproj * lview;
+
+        glViewport(0, 0, SHADOW_SIZE, SHADOW_SIZE);
+        glBindFramebuffer(GL_FRAMEBUFFER, shadow_fbo_);
+        glClear(GL_DEPTH_BUFFER_BIT);
+        glUseProgram(depth_prog_);
+        glUniformMatrix4fv(glGetUniformLocation(depth_prog_, "u_light_vp"), 1, GL_FALSE, &light_vp_[0][0]);
+        // Front-face cull during the depth pass reduces peter-panning/acne on the
+        // lit surfaces (standard shadow-map trick).
+        glEnable(GL_DEPTH_TEST);
+        GLboolean cull_was = glIsEnabled(GL_CULL_FACE);
+        glEnable(GL_CULL_FACE); glCullFace(GL_FRONT);
+        for (auto& kv : gpu_) {
+            if (kv.second.opaque_count == 0) continue;
+            glBindVertexArray(kv.second.opaque_vao);
+            glDrawArrays(GL_TRIANGLES, 0, kv.second.opaque_count);
+        }
+        glCullFace(GL_BACK);
+        if (!cull_was) glDisable(GL_CULL_FACE);
+        glBindVertexArray(0);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        return true;
+    }
+
     void render(World& world, const glm::mat4& view, const glm::mat4& proj,
                 glm::vec3 cam, glm::vec3 sun_dir, glm::vec3 fog_color,
                 float fog_start, float fog_end, float time = 0.0f) {
@@ -122,6 +170,18 @@ public:
         glUniform1f(glGetUniformLocation(chunk_prog_, "u_fog_start"), fog_start);
         glUniform1f(glGetUniformLocation(chunk_prog_, "u_fog_end"), fog_end);
         glUniform1f(glGetUniformLocation(chunk_prog_, "u_time"), time);
+
+        // Shadow map: bind to texture unit 10, hand the shader the light matrix.
+        // u_shadow_on=0 disables sampling (night / FBO missing) so the branch is
+        // free of artifacts when there's no valid depth map.
+        int shadow_on = (depth_prog_ && shadow_tex_) ? 1 : 0;
+        glUniformMatrix4fv(glGetUniformLocation(chunk_prog_, "u_light_vp"), 1, GL_FALSE, &light_vp_[0][0]);
+        glUniform1i(glGetUniformLocation(chunk_prog_, "u_shadow_on"), shadow_on);
+        if (shadow_on) {
+            glActiveTexture(GL_TEXTURE10);
+            glBindTexture(GL_TEXTURE_2D, shadow_tex_);
+            glUniform1i(glGetUniformLocation(chunk_prog_, "u_shadow_map"), 10);
+        }
         
         // Bind block textures (all materials use these)
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex_grass_);
@@ -198,6 +258,11 @@ private:
     std::unordered_map<ChunkKey, Gpu, ChunkKeyHash> gpu_;
     GLuint chunk_prog_=0, select_prog_=0;
     GLuint select_vao_=0, select_vbo_=0;
+
+    // --- shadow mapping (directional sun) ---
+    GLuint depth_prog_=0, shadow_fbo_=0, shadow_tex_=0;
+    static constexpr int SHADOW_SIZE = 2048;
+    glm::mat4 light_vp_{1.0f};   // last light-space matrix (for the main pass)
     
     // Block textures (3DWorld assets for realistic terrain)
     GLuint tex_grass_=0, tex_dirt_=0, tex_rock_=0, tex_rock2_=0, 
@@ -250,6 +315,31 @@ private:
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3*sizeof(float), (void*)0);
         glEnableVertexAttribArray(0);
         glBindVertexArray(0);
+    }
+
+    void init_shadow_fbo() {
+        glGenFramebuffers(1, &shadow_fbo_);
+        glBindFramebuffer(GL_FRAMEBUFFER, shadow_fbo_);
+        // Depth texture: stores light-space Z for shadow comparison. No color
+        // attachment needed (depth-only pass). CLAMP_TO_BORDER with white border
+        // so any sample outside the shadow frustum reads as lit (depth=1>fragZ).
+        glGenTextures(1, &shadow_tex_);
+        glBindTexture(GL_TEXTURE_2D, shadow_tex_);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, SHADOW_SIZE, SHADOW_SIZE, 0,
+                     GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+        float border[] = {1.0f, 1.0f, 1.0f, 1.0f};
+        glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, shadow_tex_, 0);
+        glDrawBuffer(GL_NONE); glReadBuffer(GL_NONE);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+            std::cerr << "[sdfcraft] shadow FBO incomplete\n";
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
 
     // --- minimal shader compilation (self-contained) ---

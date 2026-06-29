@@ -13,6 +13,11 @@ uniform float u_fog_start;
 uniform float u_fog_end;
 uniform float u_time;     // seconds, drives water animation
 
+// Shadow mapping: sun shadows via a depth map rendered from the light's POV.
+uniform int u_shadow_on;           // 0 = disabled (night/missing FBO), 1 = enabled
+uniform mat4 u_light_vp;           // light-space view*proj
+uniform sampler2DShadow u_shadow_map; // depth texture with GL_COMPARE enabled
+
 // Texture samplers (loaded by chunk_renderer)
 uniform sampler2D u_tex_grass;
 uniform sampler2D u_tex_dirt;
@@ -84,6 +89,30 @@ vec3 perturb_normal(vec3 n, vec3 pos, float strength, float scale) {
                      dX.x*aw.x + dZ.y*aw.z,
                      dX.y*aw.x + dY.y*aw.y);
     return normalize(n - grad * strength);
+}
+
+// === Shadow map sampling with PCF (percentage-closer filtering) ==============
+// Project the world position into light space, compare against the depth map.
+// 3×3 PCF: sample a small grid around the texel to soften the shadow edge
+// (instead of hard 1-pixel stair-steps). Returns 0.0=full shadow, 1.0=lit.
+float shadow_factor(vec3 world_pos) {
+    if (u_shadow_on == 0) return 1.0;   // shadows disabled
+    vec4 lp = u_light_vp * vec4(world_pos, 1.0);
+    vec3 ndc = lp.xyz / lp.w;
+    vec3 uv = ndc * 0.5 + 0.5;  // [-1,1] -> [0,1]
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || uv.z > 1.0)
+        return 1.0;             // outside shadow frustum = lit
+    // 3x3 PCF with a small bias to prevent acne. The depth-compare is baked into
+    // the sampler (GL_COMPARE_REF_TO_TEXTURE), so texture() returns [0,1].
+    float bias = 0.003;
+    float sum = 0.0;
+    vec2 texel = 1.0 / vec2(2048.0);  // SHADOW_SIZE
+    for (int y = -1; y <= 1; y++)
+    for (int x = -1; x <= 1; x++) {
+        vec2 off = vec2(x, y) * texel;
+        sum += texture(u_shadow_map, vec3(uv.xy + off, uv.z - bias));
+    }
+    return sum / 9.0;
 }
 
 // === Earthy terrain: grass -> dirt -> rock blended by DEPTH below surface ===
@@ -224,9 +253,11 @@ void main() {
     float sky_factor = light_n.y * 0.5 + 0.5;
     vec3 sky_amb = mix(vec3(0.42, 0.40, 0.38), vec3(0.55, 0.65, 0.85), sky_factor);
     float ambient_strength = 0.6; // brighter fill so caves/pits stay readable
-    // Lambertian diffuse with a high shadow floor so nothing crushes to black.
+    // Lambertian diffuse gated by shadow. The old shadow floor (0.25) is removed—
+    // real sun shadows do the darkening now, so unshadowed diffuse is pure NdotL.
     float NdotL = max(dot(light_n, to_sun), 0.0);
-    float diffuse_val = NdotL * 0.55 + 0.25; // shadow floor raised from 0.15
+    float shadow = shadow_factor(pos);
+    float diffuse_val = NdotL * shadow;
     vec3 sun_color = vec3(1.1, 1.0, 0.9);
 
     // Blinn-Phong specular — ONLY water is shiny. Rock/dirt/ore are rough,

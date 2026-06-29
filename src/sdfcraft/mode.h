@@ -389,6 +389,11 @@ public:
         // transition to the deep-blue upper atmosphere reads smoothly.
         float t_alt = glm::clamp(climb / 4000.0f, 0.0f, 1.0f);
         glm::vec3 fog_color = glm::mix(sky, glm::vec3(0.02f, 0.03f, 0.08f), t_alt);
+
+        // Shadow pass first: render geometry depth from the sun's POV. Returns
+        // false (no shadows) if it's night or the FBO wasn't created.
+        renderer_.shadow_pass(eye, sun);
+
         renderer_.render(world, view, proj, eye, sun, fog_color, fog_start, fog_end, time_);
 
         // --- mobs + other players (MC textured models) ---

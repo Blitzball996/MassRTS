@@ -23,6 +23,7 @@
 #include "crafting_screen_exact.h"
 #include "mc_model.h"
 #include "sky_renderer.h"
+#include "tree_renderer.h"
 #include "player_preview.h"
 #include "world_ops.h"
 #include "server_sim.h"
@@ -167,6 +168,7 @@ public:
         craft_scr_ready_ = craft_screen_.init();
         mob_ready_  = mobs_rend_.init();
         sky_ready_  = sky_.init(shader_dir);
+        tree_ready_ = tree_rend_.init();
         planet_ready_ = planet_rend_.init();
         planet_.height = [](const dvec3& dir)->double {
             double n = std::sin(dir.x*8.0)*std::cos(dir.y*6.0)*std::sin(dir.z*7.0);
@@ -351,6 +353,7 @@ public:
         bool hdr = postfx_ready_ && postfx_.enabled;
         renderer_.hdr_out = hdr;
         sky_.hdr_out = hdr;
+        tree_rend_.hdr_out = hdr;
 
         // Stream chunk meshes + render the sun shadow map BEFORE binding the HDR
         // target. shadow_pass() binds its own depth FBO and returns to FBO 0, so
@@ -420,6 +423,17 @@ public:
         glm::vec3 fog_color = glm::mix(sky, glm::vec3(0.02f, 0.03f, 0.08f), t_alt);
 
         renderer_.render(world, view, proj, eye, sun, fog_color, fog_start, fog_end, time_);
+
+        // --- smooth procedural trees (collected from loaded chunks in range) ---
+        // Drawn after terrain so they depth-test against it, inside the HDR pass
+        // so they get the same bloom/ACES/grade. Radius matches the chunk view
+        // distance so trees fade out with the same fog wall as the ground.
+        if (tree_ready_) {
+            tree_instances_.clear();
+            world.collect_trees(eye, view_dist + CHUNK_SX, tree_instances_);
+            tree_rend_.render(tree_instances_, view, proj, eye, sun,
+                              fog_color, fog_start, fog_end, time_);
+        }
 
         // --- mobs + other players (MC textured models) ---
         if (mob_ready_) {
@@ -511,6 +525,9 @@ private:
     bool           mob_ready_ = false;
     SkyRenderer    sky_;
     bool           sky_ready_ = false;
+    TreeRenderer   tree_rend_;        // smooth procedural trees (replaces voxel LOG/LEAVES)
+    bool           tree_ready_ = false;
+    std::vector<TreeInstance> tree_instances_;  // scratch: visible trees collected each frame
     // HDR + bloom + cinematic grade post stack (ported from MassRTS_GPU). Lazily
     // initialised on the first render() once we know the framebuffer size, and
     // resized when the window changes. When disabled (shader load failed) the

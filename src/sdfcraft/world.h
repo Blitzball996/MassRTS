@@ -27,6 +27,9 @@ namespace sdfcraft {
 static constexpr int CHUNK_SX = 16;   // blocks per chunk on X
 static constexpr int CHUNK_SZ = 16;   // blocks per chunk on Z
 static constexpr int CHUNK_SY = 128;  // world height (single vertical chunk)
+static constexpr int CHUNK_SX_LOG2 = 4;  // log2(16) for bit shifts
+static constexpr int CHUNK_SZ_LOG2 = 4;
+static constexpr int CHUNK_SY_LOG2 = 7;  // log2(128)
 static constexpr float BLOCK_SIZE = 1.0f;
 
 // {x,y,z, oldBlockId} for each block a carve/edit flipped (shared by world_ops
@@ -104,6 +107,21 @@ struct Noise {
     }
 };
 
+// A decorative tree placed at generation time. Trees are NO LONGER stamped into
+// the block field as BLOCK_LOG/LEAVES cubes (which read as ugly voxel blobs);
+// instead each column that would grow a tree records one of these, and the
+// TreeRenderer draws a smooth procedural mesh (tapered trunk + rounded canopy)
+// for it through the HDR pipeline. base_y is the FLOAT ground height so the
+// trunk meets the marching-cubes surface exactly with no float/sink gap.
+struct TreeInstance {
+    float wx, base_y, wz;   // world-space trunk base
+    uint8_t species;        // 0 = broadleaf oak, 1 = conifer pine
+    float trunk_h;          // trunk height in blocks
+    float canopy_r;         // canopy radius in blocks
+    float lean_x, lean_z;   // small canopy lean for natural variety
+    uint32_t seed;          // per-tree deterministic seed (yaw, noise)
+};
+
 struct Chunk {
     ChunkKey key;
     std::vector<BlockId> blocks;   // size CHUNK_SX*CHUNK_SY*CHUNK_SZ
@@ -111,6 +129,7 @@ struct Chunk {
     // When non-empty, MCMesher uses this instead of the ±0.5 discrete field.
     // Values are signed distances in block units: negative=solid, positive=air.
     std::vector<float>   sdf;      // same index layout as blocks, or empty
+    std::vector<TreeInstance> trees;  // decorative trees grown in this chunk (smooth mesh, not blocks)
     bool generated = false;
     bool dirty_mesh = true;        // needs remesh
     bool dirty_save = false;       // has unsaved player edits
@@ -468,6 +487,21 @@ public:
 
     std::unordered_map<ChunkKey, Chunk, ChunkKeyHash>& chunks() { return chunks_; }
 
+    // Collect every tree instance from loaded chunks within `radius` blocks of
+    // the camera (XZ). The TreeRenderer draws these as smooth meshes each frame.
+    // Cheap: trees are a handful per chunk, so we just append the in-range ones.
+    void collect_trees(glm::vec3 cam, float radius, std::vector<TreeInstance>& out) const {
+        float r2 = radius * radius;
+        for (const auto& kv : chunks_) {
+            const Chunk& c = kv.second;
+            if (c.trees.empty()) continue;
+            for (const TreeInstance& t : c.trees) {
+                float dx = t.wx - cam.x, dz = t.wz - cam.z;
+                if (dx*dx + dz*dz <= r2) out.push_back(t);
+            }
+        }
+    }
+
     // === Tree physics: check if LOG/LEAVES are floating, trigger gravity collapse ===
     // When a tree block is broken, check connected tree blocks above for support.
     // If unsupported (no path to ground), they fall and drop as items.
@@ -780,154 +814,32 @@ private:
         float r2 = noise_.rand2(wx - 51, wz + 71);
         float r3 = noise_.rand2(wx + 17, wz + 233);
 
-        // Pick a species: pine on cold/high ground, bushy oak elsewhere, with an
-        // occasional tall "ancient" variant for skyline variety.
+        // Record a smooth-mesh tree instead of stamping LOG/LEAVES voxels. The
+        // TreeRenderer turns this into a tapered trunk + rounded canopy. base_y
+        // is the FLOAT surface so the trunk meets the marching-cubes ground with
+        // no sink/float gap (the old voxel trees padded roots at h-1/h for this).
         bool cold = (h > sea_level + 26);
-        if (cold || r3 > 0.82f) build_pine(c, lx, lz, h, r1, r2);
-        else                    build_oak(c, lx, lz, h, r1, r2, r3 > 0.6f);
+        bool pine = cold || r3 > 0.82f;
+        bool tall = (!pine) && (r3 > 0.6f);
+
+        TreeInstance t;
+        t.wx     = (float)wx + 0.5f;
+        t.wz     = (float)wz + 0.5f;
+        t.base_y = surface_height_f((float)wx + 0.5f, (float)wz + 0.5f);
+        t.species = pine ? 1 : 0;
+        if (pine) {
+            t.trunk_h  = 8.0f + r1 * 6.0f;     // 8..14
+            t.canopy_r = 3.4f + r2 * 0.8f;     // narrow conifer
+        } else {
+            t.trunk_h  = (tall ? 8.0f : 5.0f) + r1 * 4.0f;   // 5..12
+            t.canopy_r = (tall ? 5.0f : 4.0f) + r2 * 1.2f;   // bushy broadleaf
+        }
+        t.lean_x = (r2 - 0.5f) * 1.2f;
+        t.lean_z = (r1 - 0.5f) * 1.2f;
+        t.seed   = (uint32_t)(wx * 73856093) ^ (uint32_t)(wz * 19349663);
+        c.trees.push_back(t);
     }
 
-    // Rounded broadleaf oak: tapering trunk + a full 3D ellipsoid canopy. The
-    // canopy is sampled as a solid spheroid (no stacked-disk gaps) with a small
-    // per-voxel noise so the silhouette breaks up naturally instead of reading
-    // as a stepped blob.
-    // Voxel-style realistic oak: thick trunk (2x2 base), branches, detailed canopy
-    void build_oak(Chunk& c, int lx, int lz, int h, float r1, float r2, bool tall) {
-        int trunk_height = (tall ? 8 : 5) + (int)(r1 * 4.0f);     // 5..12
-        
-        // === Thick trunk (2x2 at base, tapering to 1x1) ===
-        int taper_point = trunk_height / 2;
-        for (int i = 1; i <= trunk_height; i++) {
-            if (i <= taper_point) {
-                // Thick base (2x2)
-                set_local(c, lx,   h + i, lz,   BLOCK_LOG);
-                set_local(c, lx+1, h + i, lz,   BLOCK_LOG);
-                set_local(c, lx,   h + i, lz+1, BLOCK_LOG);
-                set_local(c, lx+1, h + i, lz+1, BLOCK_LOG);
-            } else {
-                // Thin top (1x1)
-                set_local(c, lx, h + i, lz, BLOCK_LOG);
-            }
-        }
-        // Anchor to ground: the MC terrain surface sits at the FLOAT
-        // surface_height_f, up to ~1 block below integer h, so a trunk starting
-        // at h+1 floats. Sink 2x2 roots to h and h-1 so the base meets the ground.
-        for (int ry = h - 1; ry <= h; ry++) {
-            set_local(c, lx,   ry, lz,   BLOCK_LOG); set_local(c, lx+1, ry, lz,   BLOCK_LOG);
-            set_local(c, lx,   ry, lz+1, BLOCK_LOG); set_local(c, lx+1, ry, lz+1, BLOCK_LOG);
-        }
-
-        int top = h + trunk_height;
-        
-        // === Add branches (horizontal LOG extensions) ===
-        int branch_start = top - 4;
-        if (branch_start < h + 3) branch_start = h + 3;
-        
-        // 4 main branches in cardinal directions
-        for (int b = 0; b < 4; b++) {
-            int branch_y = branch_start + (int)(r1 * 3.0f) + b;
-            if (branch_y > top - 1) branch_y = top - 1;
-            
-            int branch_len = 2 + (int)(r2 * 2.0f);  // 2..4 blocks
-            int dx = 0, dz = 0;
-            if (b == 0) dx = 1;       // +X
-            else if (b == 1) dx = -1; // -X
-            else if (b == 2) dz = 1;  // +Z
-            else dz = -1;             // -Z
-            
-            for (int i = 1; i <= branch_len; i++) {
-                set_local(c, lx + dx * i, branch_y, lz + dz * i, BLOCK_LOG);
-                // slight upward tilt
-                if (i == branch_len) set_local(c, lx + dx * i, branch_y + 1, lz + dz * i, BLOCK_LOG);
-            }
-        }
-        
-        // === Canopy (ellipsoid leaves around branches) ===
-        float leanx = (r2 > 0.66f) ? 1.0f : (r2 < 0.33f ? -1.0f : 0.0f);
-        float rx = (tall ? 5.0f : 4.0f) + r2 * 1.0f;  // wider canopy
-        float ry = (tall ? 4.0f : 3.5f) + r1 * 0.7f;
-        int   cy = top - 1;
-        int   ir = (int)std::ceil(std::max(rx, ry)) + 1;
-        
-        for (int dy = -ir; dy <= ir; dy++)
-        for (int dx = -ir; dx <= ir; dx++)
-        for (int dz = -ir; dz <= ir; dz++) {
-            int y = cy + dy;
-            if (y < 0 || y >= CHUNK_SY) continue;
-            float lean = leanx * ((float)(y - h) / (float)std::max(1, trunk_height)) * 1.2f;
-            int x = lx + dx + (int)std::lround(lean), z = lz + dz;
-            if (x < 0 || x >= CHUNK_SX || z < 0 || z >= CHUNK_SZ) continue;
-            
-            float fx = (float)dx / rx, fy = (float)dy / ry, fz = (float)dz / rx;
-            float d = fx*fx + fy*fy + fz*fz;
-            float n = noise_.rand2((x*131 + y*17), (z*57 + y*91)) * 0.24f;
-            
-            if (d > 1.0f + n - 0.08f) continue;
-            if (c.get(x, y, z) == BLOCK_AIR) c.set(x, y, z, BLOCK_LEAVES);
-        }
-    }
-
-    // Conifer pine: thicker trunk (2x2 base), dense stacked cone
-    void build_pine(Chunk& c, int lx, int lz, int h, float r1, float r2) {
-        int trunk_height = 8 + (int)(r1 * 6.0f);  // 8..14 tall
-        
-        // === Thick trunk (2x2 at base, tapering to 1x1) ===
-        int taper_point = trunk_height / 2;
-        for (int i = 1; i <= trunk_height; i++) {
-            if (i <= taper_point) {
-                // Thick base (2x2)
-                set_local(c, lx,   h + i, lz,   BLOCK_LOG);
-                set_local(c, lx+1, h + i, lz,   BLOCK_LOG);
-                set_local(c, lx,   h + i, lz+1, BLOCK_LOG);
-                set_local(c, lx+1, h + i, lz+1, BLOCK_LOG);
-            } else {
-                // Thin top (1x1)
-                set_local(c, lx, h + i, lz, BLOCK_LOG);
-            }
-        }
-        // Anchor pine to ground (see build_oak): roots at h and h-1.
-        for (int ry = h - 1; ry <= h; ry++) {
-            set_local(c, lx,   ry, lz,   BLOCK_LOG); set_local(c, lx+1, ry, lz,   BLOCK_LOG);
-            set_local(c, lx,   ry, lz+1, BLOCK_LOG); set_local(c, lx+1, ry, lz+1, BLOCK_LOG);
-        }
-
-        // === Conical leaf layers ===
-        int base = h + 2 + (int)(r2 * 2.0f);  // first ring height
-        int topY = h + trunk_height;
-        float maxR = 3.8f;  // slightly wider
-        
-        for (int y = base; y <= topY; y++) {
-            float frac = (float)(y - base) / (float)std::max(1, topY - base);
-            float rad = (1.0f - frac) * maxR + 0.4f;  // smooth taper
-            float rr = rad * rad;
-            int ir = (int)std::ceil(rad);
-            
-            for (int dx = -ir; dx <= ir; dx++)
-            for (int dz = -ir; dz <= ir; dz++) {
-                float dd = (float)(dx*dx + dz*dz);
-                float n = noise_.rand2((lx+dx)*71 + y*13, (lz+dz)*29 + y*53) * 0.6f;
-                if (dd > rr + n) continue;
-                
-                int x = lx + dx, z = lz + dz;
-                if (x < 0 || x >= CHUNK_SX || z < 0 || z >= CHUNK_SZ) continue;
-                // Don't block the 2x2 trunk core
-                if ((dx == 0 || dx == 1) && (dz == 0 || dz == 1) && y <= h + taper_point) continue;
-                
-                if (c.get(x, y, z) == BLOCK_AIR) c.set(x, y, z, BLOCK_LEAVES);
-            }
-        }
-        
-        // Pointed crown
-        if (topY + 1 < CHUNK_SY) set_local(c, lx, topY + 1, lz, BLOCK_LEAVES);
-        if (topY     < CHUNK_SY) set_local(c, lx, topY,     lz, BLOCK_LEAVES);
-    }
-
-    // Set a block by chunk-local coords with bounds guard.
-    static void set_local(Chunk& c, int lx, int ly, int lz, BlockId b) {
-        if (lx < 0 || lx >= CHUNK_SX || lz < 0 || lz >= CHUNK_SZ) return;
-        if (ly < 0 || ly >= CHUNK_SY) return;
-        c.set(lx, ly, lz, b);
-    }
 };
 
 } // namespace sdfcraft

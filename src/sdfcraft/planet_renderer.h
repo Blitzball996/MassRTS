@@ -173,7 +173,7 @@ private:
             "  vec3 land = sand*w_sand + grass*w_grass + rock*w_rock + snow*w_snow;\n"
             "  land = mix(land, rock, steep);\n"
             // Ocean below sea level
-            "  vec3 ocean=vec3(0.04,0.16,0.38);\n"
+            "  vec3 ocean=vec3(0.08,0.28,0.48);\n"
             "  vec3 c = h<0.0 ? ocean : land;\n"
             "  frag=vec4(c*d,1.0);\n"
             "}\n";

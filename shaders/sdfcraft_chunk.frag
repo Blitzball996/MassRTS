@@ -4,6 +4,7 @@ in vec3 v_color;
 in vec3 v_normal;
 in vec3 v_world;
 in float v_mat;
+in float v_ao;
 
 uniform vec3  u_sun_dir;
 uniform vec3  u_cam;
@@ -67,6 +68,22 @@ float hash(vec2 p) {
 float noise(vec2 p) {
     vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
     return mix(mix(hash(i),hash(i+vec2(1,0)),f.x), mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);
+}
+
+// === Analytic sky colour for water reflections =============================
+// Mirrors the sdfcraft_sky.frag gradient (horizon pale -> zenith blue) plus a
+// sun glint, so water that reflects the sky matches the actual dome behind it.
+// `dir` is the reflected view ray; `sun` points toward the sun.
+vec3 sky_approx(vec3 dir, vec3 sun) {
+    float el = clamp(dir.y, 0.0, 1.0);
+    vec3 zenith  = vec3(0.20, 0.44, 0.86);
+    vec3 mid     = vec3(0.42, 0.66, 0.95);
+    vec3 horizon = vec3(0.80, 0.89, 0.99);
+    vec3 s = mix(horizon, mid, smoothstep(0.0, 0.45, el));
+    s = mix(s, zenith, smoothstep(0.30, 1.0, pow(el, 0.55)));
+    float sd = max(dot(normalize(dir), normalize(sun)), 0.0);
+    s += vec3(1.0, 0.96, 0.86) * (pow(sd, 220.0) * 1.6 + pow(sd, 8.0) * 0.18);
+    return s;
 }
 
 // === Procedural normal detail (micro-relief without normal maps) =============
@@ -195,8 +212,12 @@ vec3 get_material_color(int mat, vec3 pos, vec3 n, vec3 w) {
         // perturbed normal + specular.)
         float r1 = noise(pos.xz * 0.18 + u_time * 0.05);
         float r2 = noise(pos.xz * 0.07 - u_time * 0.03);
-        vec3 deep    = vec3(0.04, 0.16, 0.34);
-        vec3 shallow = vec3(0.10, 0.34, 0.52);
+        // Brighter teal-blue body. The old deep navy (0.04,0.16,0.34) read as a
+        // near-black mass when viewed from above (low Fresnel), which is most of
+        // what you see flying over an ocean. A livelier blue-green keeps lakes
+        // appealing even where the sky reflection is weak.
+        vec3 deep    = vec3(0.07, 0.26, 0.44);
+        vec3 shallow = vec3(0.16, 0.46, 0.60);
         return mix(deep, shallow, clamp(r1 * 0.6 + r2 * 0.4, 0.0, 1.0));
     }
     // Safety fallback for any unhandled / earthy code that reached the special
@@ -251,8 +272,8 @@ void main() {
     // lower hemisphere is kept fairly bright so down-facing pit walls and the
     // ring just outside a dug hole are softly lit, not dead black.
     float sky_factor = light_n.y * 0.5 + 0.5;
-    vec3 sky_amb = mix(vec3(0.42, 0.40, 0.38), vec3(0.55, 0.65, 0.85), sky_factor);
-    float ambient_strength = 0.6; // brighter fill so caves/pits stay readable
+    vec3 sky_amb = mix(vec3(0.46, 0.46, 0.48), vec3(0.58, 0.68, 0.88), sky_factor);
+    float ambient_strength = 0.70; // brighter sky fill so shadows/caves read as soft, not near-black
     // Lambertian diffuse gated by shadow. The old shadow floor (0.25) is removed—
     // real sun shadows do the darkening now, so unshadowed diffuse is pure NdotL.
     float NdotL = max(dot(light_n, to_sun), 0.0);
@@ -280,6 +301,26 @@ void main() {
                + base * diffuse_val * sun_color
                + vec3(1.0, 0.98, 0.92) * spec;
 
+    // === Water: reflect the sky (Fresnel) instead of a flat dark body ========
+    // The old water was `base*ambient` only — a dead navy fill that read as an
+    // ugly dark mass at any distance. Real water mostly shows the SKY reflected
+    // off its surface, brightening toward grazing angles, with the deep body
+    // colour only visible looking straight down. Reflect the (rippled) view ray
+    // into the analytic sky, blend by a Schlick-Fresnel term, and keep the sharp
+    // sun glint on top. This is the biggest single visual fix for lakes/oceans.
+    if (mat == MAT_WATER) {
+        vec3 refl   = reflect(-to_cam, light_n);
+        vec3 skyref = sky_approx(refl, to_sun);
+        float fres  = pow(1.0 - max(dot(to_cam, light_n), 0.0), 5.0);
+        // Lift the Fresnel floor so even top-down water keeps a clear sky sheen
+        // (real water scatters/reflects skylight at all angles); pure body colour
+        // alone looked like dead navy paint from above.
+        fres = clamp(0.18 + 0.82 * fres, 0.18, 1.0);
+        vec3 body   = base * (ambient_strength * sky_amb + diffuse_val * sun_color * 0.6)
+                    + skyref * 0.12;                     // ambient sky tint in the body
+        color = mix(body, skyref, fres) + vec3(1.0, 0.98, 0.92) * spec;
+    }
+
     // Rim light REMOVED. `sky_amb*rim` lit the silhouette of every thin edge a
     // glowing blue-grey. On the thin grass shelves a dig leaves between carve
     // spheres, that glow framed them like a bright bordered card — exactly the
@@ -290,6 +331,11 @@ void main() {
     // down-facing face. On a fresh dig the overhang/rim around the hole faces
     // partly downward, so it turned pitch-black — the "黑一圈" ring. Removed; the
     // hemisphere ambient already gives a gentle, even darkening to concavities.
+
+    // === Vertex-based Ambient Occlusion ===
+    // Apply AO uniformly to darken occluded areas (cave interiors, crevices, corners).
+    // v_ao ranges from 0.4 (fully occluded) to 1.0 (fully exposed).
+    color *= v_ao;
 
     // === Atmospheric fog (distance-based, cool blue) ===
     float d = length(pos - u_cam);

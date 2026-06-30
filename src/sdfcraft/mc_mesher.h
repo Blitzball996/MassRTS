@@ -7,7 +7,7 @@
 // The isosurface (isovalue = 0) falls exactly at block boundaries, but
 // neighbour trilinear interpolation gives smooth normals + rounded edges.
 //
-// Vertex format: 10 floats (px py pz  nx ny nz  r g b  mat) — same as cube mesher.
+// Vertex format: 11 floats (px py pz  nx ny nz  r g b  mat  ao) — includes AO.
 // Only emits opaque geometry into ChunkMesh::opaque; non-opaque blocks
 // (water/glass/leaves) stay in the cube mesher's transparent pass.
 // =============================================================================
@@ -17,6 +17,7 @@
 #include <glm/glm.hpp>
 #include <cmath>
 #include <array>
+#include <algorithm>
 
 namespace sdfcraft {
 
@@ -552,16 +553,22 @@ private:
         int mc; float dc; glm::vec3 cc;
         classify_vertex(w, ctr, cn, mc, dc, cc);
         auto earthy = [](int m){ return m == MAT_GRASS || m == MAT_DIRT || m == MAT_ROCK; };
+
+        // Calculate vertex AO by sampling neighboring blocks perpendicular to vertex normals
+        float ao0 = calc_vertex_ao(w, p0, n0);
+        float ao1 = calc_vertex_ao(w, p1, n1);
+        float ao2 = calc_vertex_ao(w, p2, n2);
+
         if (earthy(mc)) {
             // per-vertex DEPTH -> smooth grass/dirt/rock, no garish, no grey sheet
-            push_vert_uniform(dst, p0, n0, c0, d0);
-            push_vert_uniform(dst, p1, n1, c1, d1);
-            push_vert_uniform(dst, p2, n2, c2, d2);
+            push_vert_uniform(dst, p0, n0, c0, d0, ao0);
+            push_vert_uniform(dst, p1, n1, c1, d1, ao1);
+            push_vert_uniform(dst, p2, n2, c2, d2, ao2);
         } else {
             float code = 200.0f + (float)mc;     // genuine special block, snapped
-            push_vert_uniform(dst, p0, n0, cc, code);
-            push_vert_uniform(dst, p1, n1, cc, code);
-            push_vert_uniform(dst, p2, n2, cc, code);
+            push_vert_uniform(dst, p0, n0, cc, code, ao0);
+            push_vert_uniform(dst, p1, n1, cc, code, ao1);
+            push_vert_uniform(dst, p2, n2, cc, code, ao2);
         }
     }
 
@@ -588,13 +595,54 @@ private:
         mat = (int)(mf + 0.5f);
     }
 
-    // Push one vertex with an explicit colour + packed material/depth value.
+    // Calculate ambient occlusion for a vertex based on neighboring solidity
+    static float calc_vertex_ao(World& w, glm::vec3 pos, glm::vec3 normal) {
+        // Derive tangent vectors from normal
+        glm::vec3 tangent1, tangent2;
+        if (std::abs(normal.y) < 0.9f) {
+            tangent1 = glm::normalize(glm::cross(normal, glm::vec3(0.0f, 1.0f, 0.0f)));
+        } else {
+            tangent1 = glm::normalize(glm::cross(normal, glm::vec3(1.0f, 0.0f, 0.0f)));
+        }
+        tangent2 = glm::cross(normal, tangent1);
+
+        // Sample 4 neighbors around the vertex, OFFSET toward the air side
+        // (along the surface normal). On a smooth marching-cubes isosurface the
+        // vertex sits exactly on the ground, so sampling in its own plane would
+        // hit the solid ground itself and darken flat open terrain. Pushing the
+        // sample ring ~0.6 above the surface means open ground reads as air
+        // (AO=1.0) and only genuine concavities — pit walls, crevices, cave
+        // mouths, the inside of a dig — have solid blocks wrapping the air-side
+        // ring and so darken. That is exactly what ambient occlusion should do.
+        int solid_count = 0;
+        float offsets[] = {0.6f, -0.6f};
+        glm::vec3 base = pos + normal * 0.6f;
+
+        for (float t1 : offsets) {
+            for (float t2 : offsets) {
+                glm::vec3 sample_pos = base + tangent1 * t1 + tangent2 * t2;
+                int ix = (int)std::floor(sample_pos.x);
+                int iy = (int)std::floor(sample_pos.y);
+                int iz = (int)std::floor(sample_pos.z);
+                BlockId b = w.get_block(ix, iy, iz);
+                if (b != BLOCK_AIR && block_is_opaque(b)) {
+                    solid_count++;
+                }
+            }
+        }
+
+        // Map 0-4 solid neighbors to AO factor 1.0 -> 0.4
+        return 1.0f - (solid_count / 4.0f) * 0.6f;
+    }
+
+    // Push one vertex with an explicit colour + packed material/depth value + AO.
     static void push_vert_uniform(std::vector<float>& dst, glm::vec3 p, glm::vec3 n,
-                                  glm::vec3 col, float mat) {
+                                  glm::vec3 col, float mat, float ao) {
         dst.push_back(p.x); dst.push_back(p.y); dst.push_back(p.z);
         dst.push_back(n.x); dst.push_back(n.y); dst.push_back(n.z);
         dst.push_back(col.r); dst.push_back(col.g); dst.push_back(col.b);
         dst.push_back(mat);
+        dst.push_back(ao);
     }
 };
 

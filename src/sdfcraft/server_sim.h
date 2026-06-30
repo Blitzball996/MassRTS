@@ -66,7 +66,7 @@ public:
 
     World&        world;
     EntityManager mobs;
-    float         time_of_day = 0.25f;   // 0..1; 0.25 = morning, 0.5 = noon, 0.75 = dusk
+    float         time_of_day = 0.35f;   // 0..1; 0.25 sunrise, 0.35 mid-morning (start), 0.5 noon, 0.75 dusk
     uint32_t      day = 0;
 
     // ---- player slots -------------------------------------------------------

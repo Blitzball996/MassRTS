@@ -77,7 +77,7 @@ void main() {
 
     // gentle tonemap + saturation lift so it reads vivid but not blown out
     sky = sky / (sky + vec3(0.18));         // soft shoulder
-    sky *= 1.18;
+    sky *= 1.10;
     sky = pow(clamp(sky, 0.0, 1.0), vec3(0.92));
     frag = vec4(sky, 1.0);
 }

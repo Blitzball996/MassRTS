@@ -392,7 +392,7 @@ public:
 
         // Shadow pass first: render geometry depth from the sun's POV. Returns
         // false (no shadows) if it's night or the FBO wasn't created.
-        renderer_.shadow_pass(eye, sun);
+        renderer_.shadow_pass(eye, sun, fb_w, fb_h);
 
         renderer_.render(world, view, proj, eye, sun, fog_color, fog_start, fog_end, time_);
 

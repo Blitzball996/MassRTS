@@ -120,6 +120,7 @@ int main(int argc, char** argv) {
     uint64_t seed = 1337;
     // --- offscreen test harness flags ---
     std::string shot_path; int shot_frames = 120;
+    float tod_override = -1.0f;   // --tod <0..1>: pin time-of-day (QA / screenshots)
     bool want_fly = false, want_planet = false, want_dig = false;
     int  qa_mob = -1;   // QA closeup: MobKind index to spawn directly in front
     bool qa_mob_side = false, qa_mob_walk = false, qa_openinv = false, qa_opencraft = false;
@@ -132,6 +133,7 @@ int main(int argc, char** argv) {
         std::string a = argv[i];
         if (a == "--shot" && i+1 < argc) shot_path = argv[++i];
         else if (a == "--frames" && i+1 < argc) shot_frames = atoi(argv[++i]);
+        else if (a == "--tod" && i+1 < argc) tod_override = (float)atof(argv[++i]);
         else if (a == "--fly") want_fly = true;
         else if (a == "--planet") want_planet = true;
         else if (a == "--dig") want_dig = true;
@@ -194,6 +196,8 @@ int main(int argc, char** argv) {
     if (want_fly) g_mode.player.flying = true;
     if (py < 1e8f) g_mode.player.pos = glm::vec3(px, py, pz);
     g_mode.player.yaw = yaw; g_mode.player.pitch = pitch;
+    if (tod_override >= 0.0f)
+        if (sdfcraft::ServerSim* s = g_mode.sim()) s->time_of_day = tod_override;
     if (want_planet) { /* toggled below once mode is ready */ }
 
     double prev = glfwGetTime();
@@ -274,6 +278,9 @@ int main(int argc, char** argv) {
             if (want_fly) g_mode.player.flying = true;
             if (py < 1e8f) g_mode.player.pos = glm::vec3(px, py, pz);
             g_mode.player.yaw = yaw; g_mode.player.pitch = pitch;
+            // pin time-of-day so the lighting in --shot is deterministic
+            if (tod_override >= 0.0f)
+                if (sdfcraft::ServerSim* s = g_mode.sim()) s->time_of_day = tod_override;
         }
 
         g_mode.update(in, dt);

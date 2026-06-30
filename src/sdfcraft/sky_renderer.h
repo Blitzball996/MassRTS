@@ -18,6 +18,10 @@ namespace sdfcraft {
 
 class SkyRenderer {
 public:
+    // When true, the sky shader emits LINEAR HDR for the PostFX composite to
+    // tonemap; when false it tonemaps + gammas inline (PostFX disabled fallback).
+    bool hdr_out = false;
+
     bool init(const std::string& shader_dir) {
         prog_ = load_program(shader_dir + "sdfcraft_sky.vert", shader_dir + "sdfcraft_sky.frag");
         if (!prog_) return false;
@@ -51,6 +55,7 @@ public:
         glUniformMatrix4fv(glGetUniformLocation(prog_, "u_proj"), 1, GL_FALSE, &proj[0][0]);
         glUniform3fv(glGetUniformLocation(prog_, "u_sun_dir"), 1, &sun_dir[0]);
         glUniform1f(glGetUniformLocation(prog_, "u_time"), time);
+        glUniform1i(glGetUniformLocation(prog_, "u_hdr_out"), hdr_out ? 1 : 0);
 
         // The dome is viewed from the inside, so its outward-wound triangles are
         // back-facing to the camera — with GL_CULL_FACE(BACK) enabled they'd all

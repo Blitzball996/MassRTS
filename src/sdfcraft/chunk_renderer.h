@@ -29,6 +29,10 @@ namespace sdfcraft {
 
 class ChunkRenderer {
 public:
+    // When true, the chunk shader emits LINEAR HDR for the PostFX composite to
+    // tonemap; when false it tonemaps + gammas inline (PostFX disabled fallback).
+    bool hdr_out = false;
+
     bool init(const std::string& shader_dir) {
         chunk_prog_  = load_program(shader_dir + "sdfcraft_chunk.vert",  shader_dir + "sdfcraft_chunk.frag");
         select_prog_ = load_program(shader_dir + "sdfcraft_select.vert", shader_dir + "sdfcraft_select.frag");
@@ -121,7 +125,7 @@ public:
     // fitted around the camera so shadow resolution stays concentrated near the
     // player. Returns false (and render() falls back to no shadows) if the FBO
     // wasn't created.
-    bool shadow_pass(glm::vec3 cam, glm::vec3 sun_dir) {
+    bool shadow_pass(glm::vec3 cam, glm::vec3 sun_dir, int restore_vp_w, int restore_vp_h) {
         if (!depth_prog_ || !shadow_fbo_) return false;
         // Light looks from the sun toward the camera region. Ortho half-extent
         // covers a generous radius around the player; depth range spans the world
@@ -155,6 +159,10 @@ public:
         if (!cull_was) glDisable(GL_CULL_FACE);
         glBindVertexArray(0);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        // CRITICAL: restore viewport to framebuffer size, else main pass renders
+        // at shadow-map resolution (2048x2048) into the window and only fills the
+        // left half (or less).
+        glViewport(0, 0, restore_vp_w, restore_vp_h);
         return true;
     }
 
@@ -170,6 +178,7 @@ public:
         glUniform1f(glGetUniformLocation(chunk_prog_, "u_fog_start"), fog_start);
         glUniform1f(glGetUniformLocation(chunk_prog_, "u_fog_end"), fog_end);
         glUniform1f(glGetUniformLocation(chunk_prog_, "u_time"), time);
+        glUniform1i(glGetUniformLocation(chunk_prog_, "u_hdr_out"), hdr_out ? 1 : 0);
 
         // Shadow map: bind to texture unit 10, hand the shader the light matrix.
         // u_shadow_on=0 disables sampling (night / FBO missing) so the branch is
@@ -275,19 +284,20 @@ private:
         glBindVertexArray(vao);
         glBindBuffer(GL_ARRAY_BUFFER, vbo);
         glBufferData(GL_ARRAY_BUFFER, data.size()*sizeof(float), data.data(), GL_DYNAMIC_DRAW);
-        GLsizei stride = 10 * sizeof(float);
+        GLsizei stride = 11 * sizeof(float);
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);                  glEnableVertexAttribArray(0);
         glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3*sizeof(float)));  glEnableVertexAttribArray(1);
         glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, stride, (void*)(6*sizeof(float)));  glEnableVertexAttribArray(2);
         glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, (void*)(9*sizeof(float)));  glEnableVertexAttribArray(3);
+        glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, stride, (void*)(10*sizeof(float))); glEnableVertexAttribArray(4);
         glBindVertexArray(0);
     }
 
     void upload(ChunkKey k, const ChunkMesh& m) {
         Gpu& g = gpu_[k];
-        if (!m.opaque.empty()) { make_buffer(g.opaque_vao, g.opaque_vbo, m.opaque); g.opaque_count = (GLsizei)(m.opaque.size()/10); }
+        if (!m.opaque.empty()) { make_buffer(g.opaque_vao, g.opaque_vbo, m.opaque); g.opaque_count = (GLsizei)(m.opaque.size()/11); }
         else g.opaque_count = 0;
-        if (!m.transparent.empty()) { make_buffer(g.trans_vao, g.trans_vbo, m.transparent); g.trans_count = (GLsizei)(m.transparent.size()/10); }
+        if (!m.transparent.empty()) { make_buffer(g.trans_vao, g.trans_vbo, m.transparent); g.trans_count = (GLsizei)(m.transparent.size()/11); }
         else g.trans_count = 0;
     }
 

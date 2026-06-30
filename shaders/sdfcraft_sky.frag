@@ -10,6 +10,7 @@ out vec4 frag;
 
 uniform vec3  u_sun_dir;   // normalized, pointing TOWARD the sun
 uniform float u_time;      // seconds, for cloud drift
+uniform int   u_hdr_out;   // 1 = output linear HDR (PostFX composites); 0 = tonemap inline
 
 // --- value noise --------------------------------------------------------------
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
@@ -75,9 +76,27 @@ void main() {
         sky = mix(sky, ccol, cover * 0.9);
     }
 
-    // gentle tonemap + saturation lift so it reads vivid but not blown out
-    sky = sky / (sky + vec3(0.18));         // soft shoulder
-    sky *= 1.10;
-    sky = pow(clamp(sky, 0.0, 1.0), vec3(0.92));
-    frag = vec4(sky, 1.0);
+    // --- day/night: sink the whole dome toward a dark night-blue as the sun
+    // drops below the horizon, so the sky doesn't stay bright-blue at midnight
+    // (which made night read like an overcast day once the HDR gamma fix landed).
+    // The sun disk/glow above were added before this, so they correctly fade out
+    // with the sun too. A small floor keeps a faint moonlit sky rather than pure
+    // black.
+    float dayf = smoothstep(-0.15, 0.20, sun.y);
+    vec3 night_sky = vec3(0.015, 0.03, 0.075);
+    sky = mix(night_sky, sky, mix(0.06, 1.0, dayf));
+
+    // With PostFX (u_hdr_out=1) the dome emits LINEAR HDR: the gradient values
+    // are authored display-referred, so we hand them over roughly as-is and let
+    // the composite's single ACES+gamma map the whole frame consistently — and
+    // the sun disk/glow (already >1.0) blooms. Without PostFX we apply the old
+    // soft-shoulder tonemap + gamma here so the dome looks right on the backbuffer.
+    if (u_hdr_out == 1) {
+        frag = vec4(sky, 1.0);
+    } else {
+        sky = sky / (sky + vec3(0.18));         // soft shoulder
+        sky *= 1.10;
+        sky = pow(clamp(sky, 0.0, 1.0), vec3(0.92));
+        frag = vec4(sky, 1.0);
+    }
 }

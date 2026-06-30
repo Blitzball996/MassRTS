@@ -13,6 +13,7 @@ uniform vec3  u_fog_color;
 uniform float u_fog_start;
 uniform float u_fog_end;
 uniform float u_time;     // seconds, drives water animation
+uniform int   u_hdr_out;  // 1 = output linear HDR (PostFX composites); 0 = tonemap inline (fallback)
 
 // Shadow mapping: sun shadows via a depth map rendered from the light's POV.
 uniform int u_shadow_on;           // 0 = disabled (night/missing FBO), 1 = enabled
@@ -273,7 +274,14 @@ void main() {
     // ring just outside a dug hole are softly lit, not dead black.
     float sky_factor = light_n.y * 0.5 + 0.5;
     vec3 sky_amb = mix(vec3(0.46, 0.46, 0.48), vec3(0.58, 0.68, 0.88), sky_factor);
-    float ambient_strength = 0.70; // brighter sky fill so shadows/caves read as soft, not near-black
+    // Day/night ambient: full sky fill in daylight, a low moonlit floor at night,
+    // driven by the sun's height. Without this the constant 0.70 fill lit night
+    // up like an overcast day once the gamma fix stopped crushing it to black.
+    // At night the fill also cools toward moonlit blue so it reads as night, not
+    // just a dim day.
+    float dayf = smoothstep(-0.15, 0.20, normalize(u_sun_dir).y);
+    sky_amb = mix(sky_amb * vec3(0.40, 0.50, 0.85), sky_amb, dayf);
+    float ambient_strength = mix(0.12, 0.70, dayf);
     // Lambertian diffuse gated by shadow. The old shadow floor (0.25) is removed—
     // real sun shadows do the darkening now, so unshadowed diffuse is pure NdotL.
     float NdotL = max(dot(light_n, to_sun), 0.0);
@@ -344,16 +352,21 @@ void main() {
     vec3 fog_sky = mix(u_fog_color, vec3(0.65, 0.78, 0.95), 0.3); // slightly bluer
     color = mix(color, fog_sky, fog);
 
-    // Slight exposure / tone mapping for HDR-like feel.
-    // ACES filmic approximation (Narkowicz) — gives a cinematic roll-off in the
-    // highlights and richer mids than the old Reinhard, which washed everything
-    // toward grey. Exposure lifted slightly so midday terrain stays vivid.
-    color *= 1.05;
-    {
+    // === Output ===
+    // With PostFX (u_hdr_out=1) we emit LINEAR HDR and let the composite pass do
+    // the single ACES tonemap + gamma + cinematic grade for the whole frame (and
+    // anything >1.0 here — sun-side specular, bright snow — feeds bloom). Without
+    // PostFX we must tonemap + gamma right here so the backbuffer isn't a murky,
+    // un-gamma'd linear dump (the old path forgot gamma, which is a big part of
+    // why terrain read so dark).
+    if (u_hdr_out == 1) {
+        frag = vec4(color, u_alpha);
+    } else {
+        color *= 1.05;
         vec3 x = color;
         const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
         color = clamp((x*(a*x+b))/(x*(c*x+d)+e), 0.0, 1.0);
+        color = pow(color, vec3(1.0/2.2));   // gamma
+        frag = vec4(color, u_alpha);
     }
-
-    frag = vec4(color, u_alpha);
 }

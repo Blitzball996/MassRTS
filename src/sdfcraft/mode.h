@@ -32,6 +32,7 @@
 #include "planet.h"
 #include "planet_mesh.h"
 #include "planet_renderer.h"
+#include "../render/postfx.h"   // HDR + bloom + ACES/grade post-processing (shared with MassRTS_GPU)
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
@@ -159,6 +160,7 @@ public:
         }
 
         // Renderers (all roles render).
+        shader_dir_ = shader_dir;   // kept for lazy PostFX init on first frame
         if (!renderer_.init(shader_dir)) return false;
         hud_ready_  = hud_.init();
         inv_scr_ready_ = inv_screen_.init();
@@ -327,12 +329,42 @@ public:
         glm::vec3 night_sky = glm::vec3(0.03f, 0.04f, 0.10f);
         glm::vec3 ground_sky = glm::mix(night_sky, day_sky, day_f);
         glm::vec3 sky = glm::mix(ground_sky, glm::vec3(0.02f, 0.03f, 0.08f), sky_t);
+        glm::vec3 sun = sun_dir;
+
+        // --- Post-processing: lazily build the HDR target now that we know the
+        // framebuffer size, then keep it matched to the window each frame. ---
+        if (!postfx_ready_) {
+            postfx_ready_ = postfx_.init(shader_dir_, fb_w, fb_h);
+            // Tuned for the bright daylight voxel scene: pull exposure below the
+            // GPU game's 1.1 so midday mids sit in a filmic range (≈mid-gray)
+            // instead of washing toward white, and lift the bloom threshold a
+            // touch so only genuinely bright HDR pixels (sun disk, water glint,
+            // sunlit snow) glow rather than the whole frame hazing.
+            postfx_.exposure        = 0.90f;
+            postfx_.bloom_threshold = 1.15f;
+            postfx_.bloom_strength  = 0.55f;
+        } else {
+            postfx_.resize(fb_w, fb_h);
+        }
+        // Tell the world shaders whether to emit linear HDR (composite tonemaps)
+        // or tonemap inline (PostFX failed to load -> straight to backbuffer).
+        bool hdr = postfx_ready_ && postfx_.enabled;
+        renderer_.hdr_out = hdr;
+        sky_.hdr_out = hdr;
+
+        // Stream chunk meshes + render the sun shadow map BEFORE binding the HDR
+        // target. shadow_pass() binds its own depth FBO and returns to FBO 0, so
+        // it must run OUTSIDE the HDR scene pass or it would unbind it mid-frame.
+        renderer_.sync(world, player.eye(), 6.0);
+        renderer_.shadow_pass(eye, sun, fb_w, fb_h);
+
+        // Bind the HDR scene buffer; all 3D (sky, planet, terrain, mobs) renders
+        // into it in linear space, then resolve() does bloom + ACES + grade.
+        postfx_.begin_scene();
         glClearColor(sky.r, sky.g, sky.b, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glEnable(GL_DEPTH_TEST);
         glEnable(GL_CULL_FACE); glCullFace(GL_BACK); glFrontFace(GL_CCW);
-
-        glm::vec3 sun = sun_dir;
 
         // --- Gradient sky dome (drawn first, fills the background) -----------
         // A real procedural sky (blue gradient + sun + drifting clouds) instead
@@ -359,6 +391,7 @@ public:
                                                (float)(R * 0.01),
                                                (float)(R * 10.0));
             planet_rend_.render(pview, pproj, sun, glm::vec3(0,1,0));
+            postfx_.resolve();   // globe overview still goes through HDR+grade
             return;
         }
 
@@ -374,10 +407,6 @@ public:
             glClear(GL_DEPTH_BUFFER_BIT);   // local terrain always on top
         }
 
-        // Meshing is now memory-bound and sub-millisecond per chunk, so we can
-        // afford a larger time budget to resolve a freshly-streamed region fast
-        // without reintroducing the old multi-chunk frame spikes.
-        renderer_.sync(world, player.eye(), 6.0);
         // Fog tuned to the loaded view distance, and pushed WAY back as you climb
         // so flying up doesn't bury you in haze. At altitude the fog all but
         // disappears, giving the seamless ground->sky->planet gradient.
@@ -389,10 +418,6 @@ public:
         // transition to the deep-blue upper atmosphere reads smoothly.
         float t_alt = glm::clamp(climb / 4000.0f, 0.0f, 1.0f);
         glm::vec3 fog_color = glm::mix(sky, glm::vec3(0.02f, 0.03f, 0.08f), t_alt);
-
-        // Shadow pass first: render geometry depth from the sun's POV. Returns
-        // false (no shadows) if it's night or the FBO wasn't created.
-        renderer_.shadow_pass(eye, sun, fb_w, fb_h);
 
         renderer_.render(world, view, proj, eye, sun, fog_color, fog_start, fog_end, time_);
 
@@ -408,6 +433,14 @@ public:
 
         if (last_hit_.hit)
             renderer_.render_selection(view, proj, glm::ivec3(last_hit_.bx, last_hit_.by, last_hit_.bz));
+
+        // === Resolve HDR scene -> backbuffer (bloom + ACES + cinematic grade) ===
+        // Everything above rendered into the HDR float buffer in linear space.
+        // resolve() runs the bright-pass + bloom mip chain, then the composite
+        // does exposure -> ACES tonemap -> contrast/split-tone/vibrance/vignette
+        // -> dither. The 2D HUD is drawn AFTER this so UI text stays crisp sRGB
+        // and isn't bloomed or graded.
+        postfx_.resolve();
 
         // 2D HUD overlay last, on top of everything — but NOT while a full-screen
         // GUI is open, or its hotbar/bars draw *under* the inventory panel and you
@@ -478,6 +511,13 @@ private:
     bool           mob_ready_ = false;
     SkyRenderer    sky_;
     bool           sky_ready_ = false;
+    // HDR + bloom + cinematic grade post stack (ported from MassRTS_GPU). Lazily
+    // initialised on the first render() once we know the framebuffer size, and
+    // resized when the window changes. When disabled (shader load failed) the
+    // scene falls back to rendering straight to the backbuffer.
+    PostFX         postfx_;
+    bool           postfx_ready_ = false;
+    std::string    shader_dir_;
     float          time_ = 0.0f;        // seconds, drives sky cloud drift
     PlanetMesh     planet_;
     PlanetRenderer planet_rend_;
